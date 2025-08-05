@@ -2,5 +2,30 @@
 name = "slime-engine"
 version = "0.1.0"
 edition = "2024"
+authors = ["tylersfoot"]
+description = "the best fucking rendering engine alive"
+repository = "https://github.com/tylersfoot/slime-engine"
 
 [dependencies]
+minifb = "0.28.0"
+winapi = "0.3.9"
+raw-window-handle = "0.6"
+rand = "0.9.2"
+nalgebra = "0.34.0"
+# wgpu = "26.0.1"
+
+[profile.release]
+debug = true
+opt-level = 3
+codegen-units = 1 # better inlining behavior / easier to read hot paths
+lto = false # optional, can obscure things if too aggressive—drop if confusing
+
+[lints.clippy]
+type-complexity = "allow"
+too-many-arguments = "allow"
+# pedantic = { level = "warn", priority = -1 }
+# restriction = { level = "warn", priority = -1 }
+# nursery = { level = "warn", priority = -1 }
+# cargo = { level = "warn", priority = -1 }
+
+

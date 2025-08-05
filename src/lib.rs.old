@@ -1,0 +1,261 @@
+//! this file is for storing old versions of code, for archive's sake
+
+// ================================ Old function for drawing/rendering a triangle
+
+// pub fn draw_triangle(buffer: &mut Buffer, vertices: &Triangle, color: Color) {
+//     //!review
+//     // given 3 vertices (x, y, z-buffer), draw a filled triangle
+    
+//     // check for NaN or infinite values in vertices
+//     for vertex in vertices {
+//         if !vertex.0.is_finite() || !vertex.1.is_finite() {
+//             return; // skip drawing invalid triangles
+//         }
+//     }
+    
+//     // sort vertices by y-coordinate
+//     let mut sorted_vertices = vertices.to_vec();
+//     sorted_vertices.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+//     let (a, b, c) = (sorted_vertices[0], sorted_vertices[1], sorted_vertices[2]);
+
+//     let interpolate_x = |y_current: f32, p1: (f32, f32, f32), p2: (f32, f32, f32)| -> f32 {
+//         let dy = p2.1 - p1.1;
+//         if dy.abs() < 1e-6 { // essentially horizontal line
+//             return p1.0; // or p2.0, they should be close
+//         }
+//         let t = (y_current - p1.1) / dy;
+//         p1.0 + t * (p2.0 - p1.0)
+//     };
+
+//     let mut x_intersections = Vec::with_capacity(3);
+
+//     // bounds for scanning
+//     let y_start = a.1.max(0.0) as usize;
+//     let y_end = c.1.min(buffer.height as f32 - 1.0) as usize;
+
+//     // Precompute barycentric constants outside the loop
+//     let denom = (b.1 - c.1) * (a.0 - c.0) + (c.0 - b.0) * (a.1 - c.1);
+//     if denom.abs() < 1e-6 { return; } // degenerate triangle
+//     let inv_denom = 1.0 / denom;
+
+//     // loop through each y (scanline)
+//     for y in y_start..=y_end {
+//         let y_f = y as f32;
+//         x_intersections.clear();
+        
+//         // find intersections with triangle edges
+//         // edge AB
+//         if (a.1 <= y_f && y_f <= b.1) || (b.1 <= y_f && y_f <= a.1) {
+//             x_intersections.push(interpolate_x(y_f, a, b));
+//         }
+//         // edge BC
+//         if (b.1 <= y_f && y_f <= c.1) || (c.1 <= y_f && y_f <= b.1) {
+//             x_intersections.push(interpolate_x(y_f, b, c));
+//         }
+//         // edge CA
+//         if (c.1 <= y_f && y_f <= a.1) || (a.1 <= y_f && y_f <= c.1) {
+//             x_intersections.push(interpolate_x(y_f, c, a));
+//         }
+        
+//         // remove duplicates and sort
+//         x_intersections.sort_by(|a, b| a.partial_cmp(b).unwrap());
+//         x_intersections.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        
+//         // draw pixels between pairs of intersections
+//         for chunk in x_intersections.chunks(2) {
+//             if chunk.len() == 2 {
+//                 let x_start = chunk[0].max(0.0) as usize;
+//                 let x_end = chunk[1].min(buffer.width as f32 - 1.0) as usize;
+                
+//                 for x in x_start..=x_end {
+//                     if x < buffer.width && y < buffer.height {
+//                         // // calculate z-buffer value using barycentric coordinates
+//                         // let (w1, w2, w3) = barycentric_weights(
+//                         //     (x as f32, y as f32),
+//                         //     (a.0, a.1),
+//                         //     (b.0, b.1),
+//                         //     (c.0, c.1)
+//                         // );
+//                         let x_f = x as f32;
+//                         let w1 = ((b.1 - c.1) * (x_f - c.0) + (c.0 - b.0) * (y_f - c.1)) * inv_denom;
+//                         let w2 = ((c.1 - a.1) * (x_f - c.0) + (a.0 - c.0) * (y_f - c.1)) * inv_denom;
+//                         let w3 = 1.0 - w1 - w2;
+//                         let z = w1 * a.2 + w2 * b.2 + w3 * c.2;
+                        
+//                         buffer.draw_pixel(x, y, color, z);
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
+
+
+// ================================ Rendering pipeline with simple math operations
+
+// pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, color: Color) {
+//     // tri points assumed to be in world space for now
+
+//     // world space -> view space
+//     let tri_view = [
+//         project_world_to_view(&tri[0], camera),
+//         project_world_to_view(&tri[1], camera),
+//         project_world_to_view(&tri[2], camera),
+//     ];
+
+//     // check if triangle is behind camera (early culling)
+//     let near_plane = 1.0;
+//     if tri_view.iter().all(|v| v.2 >= -near_plane) {
+//         return; // all vertices behind camera
+//     }
+
+//     // view space -> clip space
+//     let tri_clip = [
+//         project_view_to_clip(&tri_view[0]),
+//         project_view_to_clip(&tri_view[1]),
+//         project_view_to_clip(&tri_view[2]),
+//     ];
+
+//     // check for invalid projections
+//     for vertex in &tri_clip {
+//         if !vertex.0.is_finite() || !vertex.1.is_finite() || !vertex.2.is_finite() {
+//             return; // skip invalid triangles
+//         }
+//     }
+
+//     // clip space -> NDC (Normalized Device Coordinates)
+//     let tri_ndc = [
+//         project_clip_to_ndc(&tri_clip[0], buffer),
+//         project_clip_to_ndc(&tri_clip[1], buffer),
+//         project_clip_to_ndc(&tri_clip[2], buffer),
+//     ];
+
+//     // NDC -> screen space (pixel coordinates)
+//     let tri_screen = [
+//         project_ndc_to_screen(&tri_ndc[0], buffer),
+//         project_ndc_to_screen(&tri_ndc[1], buffer),
+//         project_ndc_to_screen(&tri_ndc[2], buffer),
+//     ];
+
+//     let edge_function = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| -> f32 {
+//         // determines which side of line ab point c is on (sign)
+//         // and the barycentric area (magnitude)
+//         (c.0 - a.0) * (b.1 - a.1) - (c.1 - a.1) * (b.0 - a.0)
+//     };
+
+//     let (a, b, c) = (tri_screen[0], tri_screen[1], tri_screen[2]);
+//     let area = edge_function((a.0, a.1), (b.0, b.1), (c.0, c.1));
+//     if area.abs() < 1e-6 {
+//         return; // degenerate triangle
+//     }
+
+//     // triangle bounding box to limit pixel checks
+//     let bounding_box = (
+//         a.0.min(b.0).min(c.0),
+//         a.1.min(b.1).min(c.1),
+//         a.0.max(b.0).max(c.0),
+//         a.1.max(b.1).max(c.1),
+//     );
+
+//     for x in bounding_box.0 as usize..bounding_box.2 as usize {
+//         for y in bounding_box.1 as usize..bounding_box.3 as usize {
+//             // check if point p is inside the triangle using edge function
+//             let p = (x as f32 + 0.5, y as f32 + 0.5);
+//             let mut w0 = edge_function((b.0, b.1), (c.0, c.1), p);
+//             let mut w1 = edge_function((c.0, c.1), (a.0, a.1), p);
+//             let mut w2 = edge_function((a.0, a.1), (b.0, b.1), p);
+//             if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) || (w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0) {
+//                 // point is inside the triangle (both sides for now)
+//                 // compute barycentric weights
+//                 w0 /= area;
+//                 w1 /= area;
+//                 w2 /= area;
+//                 // interpolate z value using barycentric weights
+//                 let z = w0 * a.2 + w1 * b.2 + w2 * c.2;
+//                 buffer.draw_pixel(x, y, color, z);
+//             }
+//         }
+//     }
+// }
+
+// pub fn project_world_to_view(point: &Point3D, camera: &Camera) -> Point3D {
+//     //!review
+//     // projects a 3D point in world space into view/camera space (camera = origin, facing -z)
+//     let (mut x, mut y, mut z) = *point;
+
+//     // apply camera transformation
+//     x -= camera.transform.position.x;
+//     y -= camera.transform.position.y;
+//     z -= camera.transform.position.z;
+
+//     // yaw (rotation around y-axis)
+//     let (sin_yaw, cos_yaw) = camera.transform.rotation.yaw.to_radians().sin_cos();
+//     let x1 = cos_yaw * x + sin_yaw * z;
+//     let z1 = -sin_yaw * x + cos_yaw * z;
+
+//     // pitch (rotation around x-axis)
+//     let (sin_pitch, cos_pitch) = camera.transform.rotation.pitch.to_radians().sin_cos();
+//     let y2 = cos_pitch * y - sin_pitch * z1;
+//     let z2 = sin_pitch * y + cos_pitch * z1;
+
+//     // roll (rotation around z-axis)
+//     let (sin_roll, cos_roll) = camera.transform.rotation.roll.to_radians().sin_cos();
+//     let x3 = cos_roll * x1 - sin_roll * y2;
+//     let y3 = sin_roll * x1 + cos_roll * y2;
+
+//     (x3, y3, z2)
+// }
+
+// pub fn project_view_to_clip(point: &Point3D) -> Point3D {
+//     // projects a 3D point in view space (camera = origin, facing -z)
+//     // into 3D clip space (x, y, z) where z is the depth
+//     let (x_view, y_view, z_view) = *point;
+
+//     // handle points at or behind camera
+//     if z_view >= 0.0 {
+//         return (f32::NAN, f32::NAN, f32::NAN);
+//     }
+    
+//     let fov_factor = 1.0; // field of view scaling factor (1.0 = ~45deg FOV)
+
+//     // perspective projection: divide by -z to project onto near plane
+//     // then scale by FOV factor
+//     let x_clip = fov_factor * x_view / -z_view;
+//     let y_clip = fov_factor * y_view / -z_view;
+//     let z_depth = -z_view; // keep z positive for depth buffer
+
+//     (x_clip, y_clip, z_depth)
+// }
+
+// pub fn project_clip_to_ndc(point: &Point3D, buffer: &Buffer) -> Point3D {
+//     // projects a 3D point in clip space (x, y, z) into normalized device coordinates (NDC)
+//     // where x and y are in [-1.0, 1.0] range
+
+//     let (x_clip, y_clip, z_clip) = *point;
+
+//     // define viewport size in clip space units
+//     // this determines how much of the world space is visible
+//     let aspect_ratio = buffer.width as f32 / buffer.height as f32;
+//     let viewport_height = 2.0; // arbitrary viewport height in clip space units
+//     let viewport_width = viewport_height * aspect_ratio;
+
+//     // convert clip coordinates to NDC [-1, 1]
+//     let x_ndc = 2.0 * x_clip / viewport_width;
+//     let y_ndc = 2.0 * y_clip / viewport_height;
+//     let z_ndc = z_clip;
+
+//     (x_ndc, y_ndc, z_ndc)
+// }
+
+// pub fn project_ndc_to_screen(point: &Point3D, buffer: &Buffer) -> Point3D {
+//     // projects a 3D point in normalized device coordinates (NDC)
+//     // into screen space (pixel coordinates)
+//     let (x_ndc, y_ndc, z_ndc) = *point;
+
+//     // convert from NDC [-1, 1] to screen coordinates [0, width/height]
+//     let x_screen = (x_ndc + 1.0) / 2.0 * buffer.width as f32;
+//     let y_screen = (1.0 - y_ndc) / 2.0 * buffer.height as f32; // invert y-axis for screen space
+//     let z_screen = z_ndc; // keep depth value for depth buffer
+
+//     (x_screen, y_screen, z_screen)
+// }
