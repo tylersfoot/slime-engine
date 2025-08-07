@@ -1,6 +1,7 @@
 
 #![allow(unused)]
 use slime_engine::*;
+use slime_engine::window::*;
 use std::time::{Instant, Duration};
 use std::io::{self, Write};
 use std::collections::VecDeque;
@@ -34,10 +35,17 @@ fn main() {
         Position { x: 10.0, y: 10.0, z: 10.0 },
         Rotation { pitch: 30.0, yaw: -45.0, roll: 0.0 },
         Scale { x: 1.0, y: 1.0, z: 1.0 },
+        90.0, // field of view in degrees
+        0.01, // near clipping plane
+        100.0, // far clipping plane
     );
 
     let (objects, floating_platform_idx) = build_scene();
     let mut scene = Scene::new(camera, objects);
+
+    // orthographic example
+    // scene.camera.set_projection(Projection::Orthographic);
+    // scene.camera.set_ortho(50.0);
 
     window.set_mouse_pos(MIDDLE.0, MIDDLE.1);
 
@@ -90,10 +98,11 @@ fn main() {
             let mouse_position = window.get_unscaled_mouse_pos(MouseMode::Discard)
                 .unwrap_or((MIDDLE.0, MIDDLE.1));
             window.set_mouse_pos(MIDDLE.0, MIDDLE.1);
-            (mouse_position.0 - MIDDLE.0, mouse_position.1 - MIDDLE.1,)
+            (mouse_position.0 - MIDDLE.0, mouse_position.1 - MIDDLE.1)
         } else {
             (0.0, 0.0)
         };
+        // let mouse_delta = (0.0, 0.0);
 
 
         let mut camera_movement = (0.0, 0.0, 0.0);
@@ -152,6 +161,16 @@ fn main() {
         if window.is_key_down(Key::E) {
             camera_rotation.2 += 1.0;
         }
+        if let Some(scroll) = window.get_scroll_wheel() {
+            if scene.camera.projection() == Projection::Orthographic {
+                // zoom in/out for orthographic camera
+                let zoom = -(scroll.1 / 12.0);
+                scene.camera.set_ortho(scene.camera.ortho() + zoom);
+            } else {
+                let fov = -(scroll.1 / 12.0);
+                scene.camera.set_fov(scene.camera.fov() + fov);
+            }
+        }
 
         // apply mouse movement to camera rotation
         camera_rotation.0 += mouse_delta.1 * 0.2;
@@ -187,9 +206,22 @@ fn main() {
         if let Some(fp) = scene.objects.get_mut(floating_platform_idx) {
             fp.rotate((0.0, 0.3 * delta, 0.0));
         }
-        buffer.clear();
 
+        // buffer.clear();
+        buffer.reset_depth();
+
+        // buffer = zoom_crop(&buffer, 2);
+        // buffer = zoom_nearest(&buffer, 1.005);
+        // bloom(&mut buffer, 20, 100, 0.05);
+        // change_brightness(&mut buffer, 0.995);
+
+ 
         scene.render(&mut buffer);
+
+        // let zoomed = zoom_nearest(&buffer, 1.2);
+        // compress_color_space(&mut buffer, 8);
+        // dither_floyd_steinberg(&mut buffer, 16);
+        // ordered_dither(&mut buffer, 32);
         // background_gradient(&mut buffer, elapsed_time);
 
         let raw_buffer = buffer.to_raw();

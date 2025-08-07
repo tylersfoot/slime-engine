@@ -1,8 +1,10 @@
+// #![allow(unused)]
 pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
 use nalgebra::{Matrix4, Vector4};
 use rand::Rng;
 use std::any::Any;
 
+pub mod window;
 
 // region codes, used for clipping
 const INSIDE: u32 = 0b0000;
@@ -17,60 +19,6 @@ pub type Color = (u8, u8, u8, u8); // RGBA format
 pub type Point3D = (f32, f32, f32); // 3D coordinates
 pub type Triangle = [Point3D; 3]; // 3D triangle defined by 3 vertices
 pub type Line3D = (Point3D, Point3D); // 3D line segment defined by end points
-
-pub struct Window {
-    // wraps minifb's Window to add custom functionality
-    pub inner: minifb::Window,
-}
-
-impl Window {
-    pub fn new(name: &str, width: usize, height: usize, options: WindowOptions) -> Result<Self, minifb::Error> {
-        let inner = minifb::Window::new(name, width, height, options)?;
-        Ok(Self {
-            inner,
-        })
-    }
-
-    pub fn set_mouse_pos(&mut self, x: f32, y: f32) {
-        // set cursor position relative to the window using raw window handle
-        #[cfg(target_os = "windows")] // only windows for now
-        unsafe {
-            use winapi::um::winuser::{SetCursorPos, ClientToScreen};
-            use winapi::shared::windef::{HWND, POINT};
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            
-            // get the raw window handle
-            if let Ok(window_handle) = self.inner.window_handle()
-                && let RawWindowHandle::Win32(handle) = window_handle.as_raw() {
-                    let hwnd = handle.hwnd.get() as HWND;
-                    
-                    let mut point = POINT {
-                        x: x as i32,
-                        y: y as i32,
-                    };
-
-                    // convert client coordinates to screen coordinates
-                    ClientToScreen(hwnd, &mut point);
-                    SetCursorPos(point.x, point.y);
-                }
-        }
-    }
-}
-
-// Deref + DerefMut -> minifb window can be accessed directly
-impl std::ops::Deref for Window {
-    type Target = minifb::Window;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl std::ops::DerefMut for Window {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
 
 
 #[derive(Clone, Copy, Default)]
@@ -125,7 +73,7 @@ impl Buffer {
     }
 
     #[inline]
-    fn index(&self, x: usize, y: usize) -> usize {
+    pub fn index(&self, x: usize, y: usize) -> usize {
         // px coords -> 1D array index
         y * self.width + x
     }
@@ -139,7 +87,25 @@ impl Buffer {
                 pixel.depth = depth;
             }
         }
-    } 
+    }
+
+    pub fn get_pixel(&self, x: usize, y: usize) -> Option<&Pixel> {
+        if x < self.width && y < self.height {
+            let idx = self.index(x, y);
+            Some(&self.pixels[idx])
+        } else {
+            None
+        }
+    }
+
+    pub fn get_pixel_mut(&mut self, x: usize, y: usize) -> Option<&mut Pixel> {
+        if x < self.width && y < self.height {
+            let idx = self.index(x, y);
+            Some(&mut self.pixels[idx])
+        } else {
+            None
+        }
+    }
 
     pub fn merge(&mut self, other: &Buffer) {
         if self.width != other.width || self.height != other.height {
@@ -155,6 +121,14 @@ impl Buffer {
 
     pub fn clear(&mut self) {
         self.pixels.fill(Self::CLEAR_PIXEL);
+    }
+
+    pub fn clear_color(&mut self, color: Color) {
+        // clear buffer with a specific color
+        self.pixels.fill(Pixel {
+            color,
+            depth: f32::INFINITY, // reset depth to max
+        })
     }
 
     pub fn reset_depth(&mut self) {
@@ -244,15 +218,42 @@ impl Scene {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Projection {
+    Perspective,
+    Orthographic,
+}
+
+#[derive(Clone, Copy)]
 pub struct Camera {
     transform: Transform,
-    pub matrix: Matrix4<f32>, // transformation matrix
+    fov: f32, // field of view in degrees
+    near: f32, // near clipping plane
+    far: f32,  // far clipping plane
+    projection: Projection, // projection type
+    ortho_size: f32, // orthographic size (for orthographic projection)
+    transform_matrix: Matrix4<f32>,
+    projection_matrix: Matrix4<f32>,
 }
 
 impl Camera {
-    pub fn new(position: Position, rotation: Rotation, scale: Scale) -> Self {
-        Self { transform: Transform { position, rotation, scale }, matrix: Matrix4::identity() }
+    pub fn new(position: Position, rotation: Rotation, scale: Scale, fov: f32, near: f32, far: f32) -> Self {
+        let mut camera = Self { 
+            transform: Transform {
+                position,
+                rotation,
+                scale
+            },
+            transform_matrix: Matrix4::identity(),
+            projection_matrix: Matrix4::identity(),
+            fov,
+            near,
+            far,
+            ortho_size: 50.0,
+            projection: Projection::Perspective
+        };
+        camera.update_matrix();
+        camera
     }
     
     fn update_matrix(&mut self) {
@@ -290,7 +291,62 @@ impl Camera {
             0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 0.0, 1.0
         );
-        self.matrix = roll_matrix * pitch_matrix * yaw_matrix * translation_matrix;
+        self.transform_matrix = roll_matrix * pitch_matrix * yaw_matrix * translation_matrix;
+
+        // projection matrix
+        if self.projection == Projection::Orthographic {
+            // orthographic projection
+            let size = self.ortho_size; // vertical size of view
+            let top = size / 2.0;
+            let bottom = -top;
+            let right = top;
+            let left = -right;
+            self.projection_matrix = make_ortho_projection(left, right, bottom, top);
+        } else {
+            // perspective projection
+            let f = 1.0 / (self.fov.to_radians() / 2.0).tan();
+            let n = self.near;
+            let far = self.far;
+            self.projection_matrix = Matrix4::new(
+                f,   0.0, 0.0, 0.0,
+                0.0, f,   0.0, 0.0,
+                0.0, 0.0, (far + n) / (n - far), (2.0 * far * n) / (n - far),
+                0.0, 0.0, -1.0, 0.0,
+            );
+        }
+    }
+
+    pub fn set_projection(&mut self, projection: Projection) {
+        self.projection = projection;
+        self.update_matrix();
+    }
+
+    pub fn projection(&self) -> Projection {
+        self.projection
+    }
+
+    pub fn set_fov(&mut self, fov: f32) {
+        self.fov = fov.clamp(1.0, 179.0); // clamp to valid range
+        self.update_matrix();
+    }
+
+    pub fn fov(&self) -> f32 {
+        self.fov
+    }
+
+    pub fn set_near(&mut self, near: f32) {
+        self.near = near.max(0.01);
+        self.update_matrix();
+    }
+    pub fn near(&self) -> f32 {
+        self.near
+    }
+    pub fn set_far(&mut self, far: f32) {
+        self.far = far.min(0.01);
+        self.update_matrix();
+    }
+    pub fn far(&self) -> f32 {
+        self.far
     }
 
     pub fn set_position(&mut self, position: Position) {
@@ -298,7 +354,7 @@ impl Camera {
         self.update_matrix();
     }
 
-    pub fn get_position(&self) -> Position {
+    pub fn position(&self) -> Position {
         self.transform.position
     }
 
@@ -312,7 +368,7 @@ impl Camera {
         self.update_matrix();
     }
 
-    pub fn get_rotation(&self) -> Rotation {
+    pub fn rotation(&self) -> Rotation {
         self.transform.rotation
     }
     pub fn pitch(&self) -> f32 { self.transform.rotation.pitch }
@@ -335,6 +391,32 @@ impl Camera {
             yaw: rotation.yaw + yaw,
             roll: rotation.roll + roll,
         });
+    }
+
+    pub fn ortho(&self) -> f32 {
+        self.ortho_size
+    }
+
+    pub fn set_ortho(&mut self, size: f32) {
+        self.ortho_size = size;
+        self.update_matrix();
+    }
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        let mut camera = Camera {
+            transform: Transform::default(),
+            fov: 90.0,
+            near: 0.01,
+            far: 100.0,
+            transform_matrix: Matrix4::identity(),
+            projection_matrix: Matrix4::identity(),
+            ortho_size: 50.0,
+            projection: Projection::Perspective,
+        };
+        camera.update_matrix();
+        camera
     }
 }
 
@@ -851,7 +933,7 @@ pub fn draw_line(buffer: &mut Buffer, p1: (f32, f32), p2: (f32, f32), color: Col
 pub fn project_to_screen_space(vertex: &(f32, f32, f32), camera: &Camera, buffer: &Buffer) -> Option<(f32, f32)> {
     let mut point = Vector4::new(vertex.0, vertex.1, vertex.2, 1.0);
     point = project_world_to_view(&point, camera);
-    point = project_view_to_clip(&point, buffer);
+    point = project_view_to_clip(&point, buffer, camera);
     point = project_clip_to_ndc(&point);
     point = project_ndc_to_screen(&point, buffer);
     Some((point.x, point.y))
@@ -878,20 +960,20 @@ pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, colors: 
     ];
 
     // backface culling
-    if is_backface(&tri_view) {
+    if is_backface(&tri_view, camera) {
         return; // skip rendering
     }
 
-    let clip_result = clip_triangle_against_near_plane(&tri_view);
+    let clip_result = clip_triangle_against_near_plane(&tri_view, camera);
     if clip_result.is_empty() {
         return; // skip rendering if triangle is fully outside near plane
     }
     for clipped in clip_result {
         // view space -> clip space
         let tri_clip: [Vector4<f32>; 3] = [
-            project_view_to_clip(&clipped[0], buffer),
-            project_view_to_clip(&clipped[1], buffer),
-            project_view_to_clip(&clipped[2], buffer),
+            project_view_to_clip(&clipped[0], buffer, camera),
+            project_view_to_clip(&clipped[1], buffer, camera),
+            project_view_to_clip(&clipped[2], buffer, camera),
         ];
 
         if is_fully_outside_clip_space(tri_clip) {
@@ -974,28 +1056,22 @@ pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, colors: 
 
 pub fn project_world_to_view(point: &Vector4<f32>, camera: &Camera) -> Vector4<f32> {
     // projects a 3D point in world space into view/camera space (camera = origin, facing -z)
-    camera.matrix * point
+    camera.transform_matrix * point
 }
 
-pub fn project_view_to_clip(point: &Vector4<f32>, buffer: &Buffer) -> Vector4<f32> {
+pub fn project_view_to_clip(point: &Vector4<f32>, buffer: &Buffer, camera: &Camera) -> Vector4<f32> {
     // projects a 3D point in view space (camera = origin, facing -z)
     // into 3D clip space (x, y, z) where z is the depth
 
-    // temporary values for now
-    let f = 1.0; // field of view
-    let a = buffer.width as f32 / buffer.height as f32; // aspect ratio
-    let n = 0.01; // near plane distance
-    let far = 100.0; // far plane distance
-
-    // perspective projection matrix
-    let perspective_matrix: Matrix4<f32> = Matrix4::new(
-        f / a, 0.0, 0.0, 0.0,
-        0.0, f, 0.0, 0.0,
-        0.0, 0.0, (far + n) / (n - far), (2.0 * far * n) / (n - far),
-        0.0, 0.0, -1.0, 0.0
+    let aspect_ratio = buffer.width as f32 / buffer.height as f32;
+    let aspect_scale_matrix: Matrix4<f32> = Matrix4::new(
+        1.0 / aspect_ratio, 0.0, 0.0, 0.0,
+        0.0, 1.0,      0.0, 0.0,
+        0.0, 0.0,      1.0, 0.0,
+        0.0, 0.0,      0.0, 1.0,
     );
 
-    perspective_matrix * point
+    aspect_scale_matrix * camera.projection_matrix * point
 }
 
 pub fn project_clip_to_ndc(point: &Vector4<f32>) -> Vector4<f32> {
@@ -1018,23 +1094,33 @@ pub fn project_ndc_to_screen(point: &Vector4<f32>, buffer: &Buffer) -> Vector4<f
     buffer.matrix * point
 }
 
-pub fn is_backface(tri: &[Vector4<f32>; 3]) -> bool {
+pub fn is_backface(tri: &[Vector4<f32>; 3], camera: &Camera) -> bool {
     // checks if a triangle is a backface (normal facing away from the camera)
     let edge1 = tri[1].xyz() - tri[0].xyz();
     let edge2 = tri[2].xyz() - tri[0].xyz();
     let normal = edge1.cross(&edge2); // unnormalized face normal
-    // average position of triangle vertices
-    let centroid = (tri[0].xyz() + tri[1].xyz() + tri[2].xyz()) / 3.0;
-    let view_direction = -centroid;
-    normal.dot(&view_direction) <= 0.0 // normal points away from camera → backface
+
+    if camera.projection == Projection::Orthographic {
+        // orthographic view: camera direction is always -Z
+        let view_direction = nalgebra::Vector3::new(0.0, 0.0, -1.0);
+        normal.dot(&view_direction) >= 0.0
+    } else {
+        // perspective view: use view direction from camera to triangle centroid
+        let centroid = (tri[0].xyz() + tri[1].xyz() + tri[2].xyz()) / 3.0;
+        let view_direction = -centroid;
+        normal.dot(&view_direction) <= 0.0 // normal points away from camera → backface
+    }
 }
 
-
-pub fn clip_triangle_against_near_plane(tri: &[Vector4<f32>; 3]) -> Vec<[Vector4<f32>; 3]> {
+pub fn clip_triangle_against_near_plane(tri: &[Vector4<f32>; 3], camera: &Camera) -> Vec<[Vector4<f32>; 3]> {
     // triangle is [A, B, C], each with view-space position (x,y,z)
-    const NEAR: f32 = 0.04;
+    let near = if camera.projection == Projection::Perspective {
+        camera.near()
+    } else {
+        -100000.0 // large value for orthographic projection
+    };
     // keeps points in front of camera
-    let inside_test = |p: Vector4<f32>| p.z <= -NEAR;
+    let inside_test = |p: Vector4<f32>| p.z <= -near;
     let mut result_vertices = Vec::new();
 
     for (p, q) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
@@ -1047,7 +1133,7 @@ pub fn clip_triangle_against_near_plane(tri: &[Vector4<f32>; 3]) -> Vec<[Vector4
 
         if p_in ^ q_in {
             // edge crosses plane, compute intersection
-            let t = (-NEAR - p.z) / (q.z - p.z);
+            let t = (-near - p.z) / (q.z - p.z);
             // interpolate all components (including any attributes)
             let i = p + t * (q - p);
             result_vertices.push(i);
@@ -1192,6 +1278,18 @@ fn interp_perspective_color(colors: [Color; 3], w_clip: (f32, f32, f32), bary: (
     let b = interp_channel(colors[0].2, colors[1].2, colors[2].2);
     let a = interp_channel(colors[0].3, colors[1].3, colors[2].3);
     (r, g, b, a)
+}
+
+pub fn make_ortho_projection(left: f32, right: f32, bottom: f32, top: f32) -> Matrix4<f32> {
+    // creates an orthographic projection matrix
+    let near = -100000.0; // near plane
+    let far = 100000.0; // far plane
+    Matrix4::new(
+        2.0 / (right - left), 0.0, 0.0, -(right + left) / (right - left),
+        0.0, 2.0 / (top - bottom), 0.0, -(top + bottom) / (top - bottom),
+        0.0, 0.0, 2.0 / (near - far), (far + near) / (near - far),
+        0.0, 0.0, 0.0, 1.0,
+    )
 }
 
 // ================================================================
