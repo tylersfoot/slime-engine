@@ -2,6 +2,7 @@
 #![allow(unused)]
 use slime_engine::*;
 use slime_engine::window::*;
+use slime_engine::object_import::*;
 use std::time::{Instant, Duration};
 use std::io::{self, Write};
 use std::collections::VecDeque;
@@ -29,7 +30,7 @@ fn main() {
     window.set_position(700, 100);
 
     window.set_target_fps(1000);
-    window.set_cursor_visibility(false);
+    // window.set_cursor_visibility(false);
 
     let camera = Camera::new(
         Position { x: 10.0, y: 10.0, z: 10.0 },
@@ -37,11 +38,22 @@ fn main() {
         Scale { x: 1.0, y: 1.0, z: 1.0 },
         90.0, // field of view in degrees
         0.01, // near clipping plane
-        100.0, // far clipping plane
+        10000.0, // far clipping plane
     );
 
-    let (objects, floating_platform_idx) = build_scene();
-    let mut scene = Scene::new(camera, objects);
+    let (mut scene, moving_cube_id, floating_platform_id) = build_scene(camera);
+
+    load_object_into_scene(
+        &mut scene, 
+        "objects/crazycorn.obj", 
+        "objects/crazycorn.mtl",
+        "crazycorn",
+        Transform {
+            position: Position { x: 30.0, y: 0.0, z: 0.0 },
+            scale: Scale { x: 0.05, y: 0.05, z: 0.05 },
+            ..Default::default()
+        }
+    );
 
     // orthographic example
     // scene.camera.set_projection(Projection::Orthographic);
@@ -194,21 +206,20 @@ fn main() {
         let offset2 = (frequency * 1.5).cos() * amplitude;
         let offset3 = (frequency * 2.0).sin() * amplitude;
 
-        scene.objects[0].set_position(
-            Position {
-                x: offset1,
-                y: 13.0 + offset2,
-                z: -5.0 + offset3,
-            }
-        );
+        scene.move_node(moving_cube_id, (offset1, 13.0 + offset2, -5.0 + offset3));
 
         // slowly spin the floating platform
-        if let Some(fp) = scene.objects.get_mut(floating_platform_idx) {
-            fp.rotate((0.0, 0.3 * delta, 0.0));
+        // scene.rotate_node(floating_platform_id, (30.0 * delta, 100.0 * delta, 60.0 * delta));
+        let crazycorn_id = scene.get_node_id("crazycorn");
+        if let Some(crazycorn_id) = crazycorn_id {
+            scene.set_node_position(crazycorn_id, Position { x: 30.0, y: 5.0 + (elapsed_time*4.0).sin() * 5.0, z: 0.0 });
+            scene.rotate_node(crazycorn_id, (30.0 * delta, 100.0 * delta, 60.0 * delta));
+            scene.set_node_scale(crazycorn_id, Scale { x: 0.05 + (elapsed_time*3.0).sin() * 0.01, y: 0.05 + (elapsed_time*3.0).sin() * 0.01, z: 0.05 + (elapsed_time*3.0).sin() * 0.01 });
         }
+        // scene.rotate_node(crazycorn_id, (30.0 * delta, 100.0 * delta, 60.0 * delta));
 
-        // buffer.clear();
-        buffer.reset_depth();
+        buffer.clear();
+        // buffer.reset_depth();
 
         // buffer = zoom_crop(&buffer, 2);
         // buffer = zoom_nearest(&buffer, 1.005);
@@ -246,12 +257,13 @@ fn background_gradient(buffer: &mut Buffer, elapsed_time: f32) {
     }
 }
 
-fn build_scene() -> (Vec<Box<dyn Object>>, usize) {
-    let mut objs: Vec<Box<dyn Object>> = Vec::new();
+fn build_scene(camera: Camera) -> (Scene, NodeId, NodeId) {
+    let mut scene = Scene::new(camera);
 
     // moving cube
-    let moving_cube = RectangularPrism::new_cube_at_coords(0.0, 20.0, -5.0, 2.0);
-    objs.push(Box::new(moving_cube) as Box<dyn Object>);
+    let moving_cube_transform = Transform::at_position_raw(0.0, 20.0, -5.0);
+    let moving_cube_id = scene.add_prism("Moving Cube", moving_cube_transform, (2.0, 2.0, 2.0), None);
+
 
     // floor grid
     let grid_size = 10;
@@ -261,8 +273,8 @@ fn build_scene() -> (Vec<Box<dyn Object>>, usize) {
         for j in 0..grid_size {
             let x = (i as f32 - (grid_size as f32) / 2.0 + 0.5) * tile_size;
             let z = (j as f32 - (grid_size as f32) / 2.0 + 0.5) * tile_size;
-            let tile = RectangularPrism::new_at_coords(x, floor_y, z, (tile_size, 0.5, tile_size));
-            objs.push(Box::new(tile) as Box<dyn Object>);
+            let tile_transform = Transform::at_position_raw(x, floor_y, z);
+            scene.add_prism("Floor Tile", tile_transform, (tile_size, 0.5, tile_size), None);
         }
     }
 
@@ -275,27 +287,22 @@ fn build_scene() -> (Vec<Box<dyn Object>>, usize) {
             let z = (j as f32 - (pillar_grid as f32) / 2.0) * spacing;
             // height wobbles so it's not all uniform
             let h = 1.0 + ((i as f32 * 0.5).sin() + (j as f32 * 0.5).cos()).abs() * 3.0;
-            let pillar = RectangularPrism::new(
-                Transform {
-                    position: Position { x, y: floor_y + h / 2.0, z }, // center so bottom rests on floor
-                    rotation: Rotation { pitch: 0.0, yaw: 0.0, roll: 0.0 },
-                    scale: Scale { x: 1.0, y: h, z: 1.0 },
-                },
-                (1.0, h, 1.0),
-            );
-            objs.push(Box::new(pillar) as Box<dyn Object>);
+            let pillar_transform = Transform::at_position_raw(x, floor_y + h / 2.0, z);
+            scene.add_prism("Pillar", pillar_transform, (1.0, h, 1.0), None);
         }
     }
 
     // floating tilted platform
-    let floating_platform_index = objs.len();
-    let floating_platform = RectangularPrism::new(
-        Transform {
-            position: Position { x: 0.0, y: 20.0, z: -5.0 },
-            rotation: Rotation { pitch: 30.0, yaw: 45.0, roll: 0.0 },
-            scale: Scale { x: 3.0, y: 0.2, z: 3.0 },
-        },
+    let floating_platform_transform = Transform {
+        position: Position { x: 0.0, y: 20.0, z: -5.0 },
+        rotation: Rotation { pitch: 30.0, yaw: 45.0, roll: 0.0 },
+        scale: Scale { x: 1.0, y: 1.0, z: 1.0 }, // Scale is now separate from size
+    };
+    let floating_platform_id = scene.add_prism(
+        "Floating Platform",
+        floating_platform_transform,
         (3.0, 0.2, 3.0),
+        None
     );
     objs.push(Box::new(floating_platform) as Box<dyn Object>);
 
@@ -306,16 +313,13 @@ fn build_scene() -> (Vec<Box<dyn Object>>, usize) {
         let x = angle.cos() * radius;
         let z = angle.sin() * radius - 5.0;
         let size = 0.5 + (k as f32 * 0.2);
-        let cube = RectangularPrism::new_cube(
-            Transform {
-                position: Position { x, y: 10.0, z },
-                rotation: Rotation { pitch: k as f32 * 12.0, yaw: k as f32 * 20.0, roll: 0.0 },
-                scale: Scale::default(),
-            },
-            size,
-        );
-        objs.push(Box::new(cube) as Box<dyn Object>);
+        let cube_transform = Transform {
+            position: Position { x, y: 10.0, z },
+            rotation: Rotation { pitch: k as f32 * 12.0, yaw: k as f32 * 20.0, roll: 0.0 },
+            ..Default::default()
+        };
+        scene.add_prism("Ring Cube", cube_transform, (size, size, size), None);
     }
 
-    (objs, floating_platform_index)
+    (scene, moving_cube_id, floating_platform_id)
 }

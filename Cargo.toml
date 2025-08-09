@@ -12,6 +12,7 @@ winapi = "0.3.9"
 raw-window-handle = "0.6"
 rand = "0.9.2"
 nalgebra = "0.34.0"
+slotmap = "1.0.7"
 # wgpu = "26.0.1"
 
 [profile.release]
