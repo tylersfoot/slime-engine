@@ -2,11 +2,11 @@
 pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
 use nalgebra::{Matrix4, Point3, Rotation3, UnitQuaternion, Vector3, Vector4};
 use rand::Rng;
-use std::ops::Mul;
 use slotmap::{SlotMap, new_key_type};
+use std::ops::Mul;
 
-pub mod window;
 pub mod object_import;
+pub mod window;
 
 use object_import::*;
 
@@ -24,6 +24,7 @@ pub type Point3D = (f32, f32, f32); // 3D coordinates
 pub type Triangle = [Point3D; 3]; // 3D triangle defined by 3 vertices
 pub type Line3D = (Point3D, Point3D); // 3D line segment defined by end points
 
+
 // Unique IDs for various objects
 new_key_type! {
     pub struct NodeId;
@@ -32,30 +33,25 @@ new_key_type! {
     pub struct MaterialId;
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct Pixel {
-    pub color: Color, // RGBA format
-    pub depth: f32, // depth value for z-buffering
-}
-
 #[derive(Clone, Default)]
 pub struct Buffer {
     pub width: usize,
     pub height: usize,
-    pub pixels: Vec<Pixel>,
+    pub color_buffer: Vec<Color>, // RGBA format
+    pub depth_buffer: Vec<f32>, // depth value for z-buffering
     pub matrix: Matrix4<f32>, // transformation matrix
 }
 
 impl Buffer {
-    const CLEAR_PIXEL: Pixel = Pixel {
-        color: (0, 0, 0, 0), // transparent black
-        depth: f32::INFINITY, // max depth
-    };
+    const CLEAR_COLOR: Color = (0, 0, 0, 0);  // transparent black
+    const CLEAR_DEPTH: f32 = f32::INFINITY; // max depth
+
     pub fn new(width: usize, height: usize) -> Self {
         let mut buffer = Self {
             width,
             height,
-            pixels: vec![Self::CLEAR_PIXEL; width * height],
+            color_buffer: vec![Self::CLEAR_COLOR; width * height],
+            depth_buffer: vec![Self::CLEAR_DEPTH; width * height],
             matrix: Matrix4::identity()
         };
         buffer.update_matrix();
@@ -92,27 +88,18 @@ impl Buffer {
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: Color, depth: f32) {
         if x < self.width && y < self.height {
             let idx = self.index(x, y);
-            let pixel = &mut self.pixels[idx];
-            if depth < pixel.depth {
-                pixel.color = color;
-                pixel.depth = depth;
+            let pixel = &mut self.color_buffer[idx];
+            if depth < self.depth_buffer[idx] {
+                *pixel = color;
+                self.depth_buffer[idx] = depth;
             }
         }
     }
 
-    pub fn get_pixel(&self, x: usize, y: usize) -> Option<&Pixel> {
+    pub fn get_pixel(&self, x: usize, y: usize) -> Option<&Color> {
         if x < self.width && y < self.height {
             let idx = self.index(x, y);
-            Some(&self.pixels[idx])
-        } else {
-            None
-        }
-    }
-
-    pub fn get_pixel_mut(&mut self, x: usize, y: usize) -> Option<&mut Pixel> {
-        if x < self.width && y < self.height {
-            let idx = self.index(x, y);
-            Some(&mut self.pixels[idx])
+            Some(&self.color_buffer[idx])
         } else {
             None
         }
@@ -123,41 +110,39 @@ impl Buffer {
             panic!("Buffers must have the same dimensions to merge.");
         }
 
-        for (self_pixel, other_pixel) in self.pixels.iter_mut().zip(other.pixels.iter()) {
-            if other_pixel.depth < self_pixel.depth {
-                *self_pixel = *other_pixel;
+        for i in 0..self.color_buffer.len() {
+            if other.depth_buffer[i] < self.depth_buffer[i] {
+                self.color_buffer[i] = other.color_buffer[i];
+                self.depth_buffer[i] = other.depth_buffer[i];
             }
         }
     }
 
     pub fn clear(&mut self) {
-        self.pixels.fill(Self::CLEAR_PIXEL);
+        self.color_buffer.fill(Self::CLEAR_COLOR);
+        self.depth_buffer.fill(Self::CLEAR_DEPTH);
     }
 
     pub fn clear_color(&mut self, color: Color) {
         // clear buffer with a specific color
-        self.pixels.fill(Pixel {
-            color,
-            depth: f32::INFINITY, // reset depth to max
-        })
+        self.color_buffer.fill(color);
+        self.depth_buffer.fill(f32::INFINITY); // reset depth to max
     }
 
     pub fn reset_depth(&mut self) {
         // reset depth values to max
-        for pixel in &mut self.pixels {
-            pixel.depth = f32::INFINITY;
-        }
+        self.depth_buffer.fill(f32::INFINITY);
     }
 
     pub fn to_raw(&self) -> Vec<u32> {
         // convert to flat array of u32 in ARGB format
-        self.pixels
+        self.color_buffer
             .iter()
             .map(|pixel| {
-                  (pixel.color.3 as u32) << 24
-                | (pixel.color.0 as u32) << 16
-                | (pixel.color.1 as u32) << 8
-                | (pixel.color.2 as u32)
+                  (pixel.3 as u32) << 24
+                | (pixel.0 as u32) << 16
+                | (pixel.1 as u32) << 8
+                | (pixel.2 as u32)
             })
             .collect()
     }
@@ -174,13 +159,19 @@ pub struct Scene {
 
 impl Scene {
     pub fn new(camera: Camera) -> Self {
-        Self { 
+        Self {
             camera,
             ..Default::default()
         }
     }
 
-    pub fn add_node(&mut self, name: &str, transform: Transform, kind: Option<ObjectKind>, parent: Option<NodeId>) -> NodeId {
+    pub fn add_node(
+        &mut self,
+        name: &str,
+        transform: Transform,
+        kind: Option<ObjectKind>,
+        parent: Option<NodeId>,
+    ) -> NodeId {
         // Adds a new node to the scene and returns its unique ID
         let node = Node {
             name: name.to_string(),
@@ -409,6 +400,8 @@ impl Scene {
     pub fn render(&self, buffer: &mut Buffer) {
         const TYPE: &str = "full"; // "full", "wireframe", "points"
 
+        let view_projection = create_view_projection_matrix(buffer, &self.camera);
+
         // iterate through every node in the scene graph
         for (node_id, node) in self.nodes.iter() {
             // skip nodes that don't have any geometry
@@ -453,26 +446,23 @@ impl Scene {
             // get the final transformation matrix for this node
             let world_transform_matrix = self.get_world_transform_matrix(node_id);
 
-            // apply the world transform to every vertex of the local triangles
-            let world_tris: Vec<Triangle> = local_tris.into_iter().map(|local_tri| {
-                let p0 = world_transform_matrix.transform_point(&Point3::new(local_tri[0].0, local_tri[0].1, local_tri[0].2));
-                let p1 = world_transform_matrix.transform_point(&Point3::new(local_tri[1].0, local_tri[1].1, local_tri[1].2));
-                let p2 = world_transform_matrix.transform_point(&Point3::new(local_tri[2].0, local_tri[2].1, local_tri[2].2));
-                [
-                    (p0.x, p0.y, p0.z),
-                    (p1.x, p1.y, p1.z),
-                    (p2.x, p2.y, p2.z),
-                ]
-            }).collect();
-
+            // draw wiremesh edges
             if TYPE == "wireframe" {
-                // draw wiremesh edges
-                for tri in world_tris.iter() {
+                // apply the world transform to the local triangle
+                for tri in &local_tris {
+                    let p0 = world_transform_matrix
+                        .transform_point(&Point3::new(tri[0].0, tri[0].1, tri[0].2));
+                    let p1 = world_transform_matrix
+                        .transform_point(&Point3::new(tri[1].0, tri[1].1, tri[1].2));
+                    let p2 = world_transform_matrix
+                        .transform_point(&Point3::new(tri[2].0, tri[2].1, tri[2].2));
+                    let world_tri = [(p0.x, p0.y, p0.z), (p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z)];
+
                     // For a triangle, the edges are always (0,1), (1,2), (2,0)
                     let tri_edges = [(0, 1), (1, 2), (2, 0)];
                     for &(i0, i1) in tri_edges.iter() {
-                        let v1 = tri[i0];
-                        let v2 = tri[i1];
+                        let v1 = world_tri[i0];
+                        let v2 = world_tri[i1];
 
                         // Try to clip the line in 3D space before projection
                         if let Some((clipped_v1, clipped_v2)) = clip_line_to_camera_plane(v1, v2, &self.camera) {
@@ -489,8 +479,18 @@ impl Scene {
                 }
             }
 
+            // draw filled triangles
             if TYPE == "full" {
-                for (i, tri) in world_tris.iter().enumerate() {
+                // apply the world transform to the local triangle
+                for (i, tri) in local_tris.iter().enumerate() {
+                    let p0 = world_transform_matrix
+                        .transform_point(&Point3::new(tri[0].0, tri[0].1, tri[0].2));
+                    let p1 = world_transform_matrix
+                        .transform_point(&Point3::new(tri[1].0, tri[1].1, tri[1].2));
+                    let p2 = world_transform_matrix
+                        .transform_point(&Point3::new(tri[2].0, tri[2].1, tri[2].2));
+                    let world_tri = [(p0.x, p0.y, p0.z), (p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z)];
+
                     let color_data = match object_kind {
                         ObjectKind::Mesh(_) => {
                             // use the material color if available, otherwise fallback
@@ -510,7 +510,7 @@ impl Scene {
                             self.prisms[prism_id].tri_colors[i % 12]
                         }
                     };
-                    render_tri(buffer, &self.camera, tri, color_data);
+                    render_tri(buffer, &self.camera, &world_tri, color_data, &view_projection);
                 }
             }
         }
@@ -541,7 +541,7 @@ impl Camera {
             transform: Transform {
                 position,
                 rotation,
-                scale
+                scale,
             },
             transform_matrix: Matrix4::identity(),
             projection_matrix: Matrix4::identity(),
@@ -662,7 +662,7 @@ impl Camera {
             // clamp camera pitch to prevent flipping
             pitch: rotation.pitch.clamp(-89.0, 89.0),
             yaw: rotation.yaw,
-            roll: rotation.roll
+            roll: rotation.roll,
         };
         self.update_matrix();
     }
@@ -943,7 +943,7 @@ pub struct MeshComponent {
 
 impl MeshComponent {
     pub fn get_local_tris(&self) -> Vec<Triangle> {
-        // converts the indexed faces of the mesh into 
+        // converts the indexed faces of the mesh into
         // a flat list of triangles in local space
         let mut tris = Vec::new();
 
@@ -959,7 +959,7 @@ impl MeshComponent {
             let v0_index = face.vertex_indices[0] as usize;
             let v0 = self.vertices[v0_index];
 
-            // create tris by connecting the anchor to 
+            // create tris by connecting the anchor to
             // every subsequent pair of vertices
             // for a quad (v0, v1, v2, v3) this creates tris (v0, v1, v2) and (v0, v2, v3)
             for i in 1..(face.vertex_indices.len() - 1) {
@@ -975,7 +975,6 @@ impl MeshComponent {
         tris
     }
 }
-
 
 #[derive(Clone, Copy)]
 pub struct RectangularPrismComponent {
@@ -1142,7 +1141,7 @@ pub fn clip_line_to_camera_plane(v1: (f32, f32, f32), v2: (f32, f32, f32), camer
     // transform vertices to camera space
     let transform_vertex = |vertex: (f32, f32, f32)| -> (f32, f32, f32) {
         let (mut x, mut y, mut z) = vertex;
-        
+
         // apply camera translation
         x -= camera.transform.position.x;
         y -= camera.transform.position.y;
@@ -1168,36 +1167,36 @@ pub fn clip_line_to_camera_plane(v1: (f32, f32, f32), v2: (f32, f32, f32), camer
 
     let cam_v1 = transform_vertex(v1);
     let cam_v2 = transform_vertex(v2);
-    
+
     let near_plane = -0.01; // very close to camera
-    
+
     // check if both points are behind camera
     if cam_v1.2 >= near_plane && cam_v2.2 >= near_plane {
         return None; // both behind camera
     }
-    
+
     // check if both points are in front of camera
     if cam_v1.2 < near_plane && cam_v2.2 < near_plane {
         return Some((v1, v2)); // both in front, no clipping needed
     }
-    
+
     // one point is behind, one is in front - need to clip
     let (front_point, behind_point, front_cam, behind_cam) = if cam_v1.2 < near_plane {
         (v1, v2, cam_v1, cam_v2)
     } else {
         (v2, v1, cam_v2, cam_v1)
     };
-    
+
     // calculate intersection with near plane
     let t = (near_plane - front_cam.2) / (behind_cam.2 - front_cam.2);
-    
+
     // interpolate to find intersection point in world space
     let intersect = (
         front_point.0 + t * (behind_point.0 - front_point.0),
         front_point.1 + t * (behind_point.1 - front_point.1),
         front_point.2 + t * (behind_point.2 - front_point.2),
     );
-    
+
     Some((front_point, intersect))
 }
 
@@ -1287,9 +1286,13 @@ pub fn project_to_screen_space(vertex: &(f32, f32, f32), camera: &Camera, buffer
 
 // ================================ MATRIX RENDERING ================================
 
-pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, colors: [Color; 3]) {
-    // tri points assumed to be in world space for now
-
+pub fn render_tri(
+    buffer: &mut Buffer,
+    camera: &Camera,
+    tri: &Triangle,
+    colors: [Color; 3],
+    view_projection: &Matrix4<f32>
+) {
     // convert triangle vertices to homogeneous coordinates (x, y, z, w)
     // this allows for easier matrix transformations
     let tri_hom: [Vector4<f32>; 3] = [
@@ -1315,11 +1318,11 @@ pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, colors: 
         return; // skip rendering if triangle is fully outside near plane
     }
     for clipped in clip_result {
-        // view space -> clip space
+        // view space -> clip space using precomputed matrix
         let tri_clip: [Vector4<f32>; 3] = [
-            project_view_to_clip(&clipped[0], buffer, camera),
-            project_view_to_clip(&clipped[1], buffer, camera),
-            project_view_to_clip(&clipped[2], buffer, camera),
+            view_projection * clipped[0],
+            view_projection * clipped[1],
+            view_projection * clipped[2],
         ];
 
         if is_fully_outside_clip_space(tri_clip) {
@@ -1341,10 +1344,8 @@ pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, colors: 
         }
 
         // check for invalid projections
-        for vertex in &tri_ndc {
-            if !vertex.x.is_finite() || !vertex.y.is_finite() || !vertex.z.is_finite() {
-                continue; // skip invalid triangles
-            }
+        if tri_ndc.iter().any(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite()) {
+            continue;
         }
 
         // NDC -> screen space (pixel coordinates)
@@ -1370,8 +1371,8 @@ pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, colors: 
         // triangle bounding box to limit pixel checks
         let bounding_box = compute_clamped_bbox(&tri_screen, buffer.width as f32, buffer.height as f32);
 
-        for x in bounding_box.0 as usize..bounding_box.2 as usize {
-            for y in bounding_box.1 as usize..bounding_box.3 as usize {
+        for y in bounding_box.1..bounding_box.3 {
+            for x in bounding_box.0..bounding_box.2 {
                 // check if point p is inside the triangle using edge function
                 let p = (x as f32 + 0.5, y as f32 + 0.5);
                 let mut w0 = edge_function((b.x, b.y), (c.x, c.y), p);
@@ -1388,12 +1389,11 @@ pub fn render_tri(buffer: &mut Buffer, camera: &Camera, tri: &Triangle, colors: 
                     // linearly interpolate 1/w, then invert to get w for depth testing
                     let inv_w_interp = interp_linear_scalar(
                         (1.0 / clip_w.0, 1.0 / clip_w.1, 1.0 / clip_w.2), 
-                        bary
+                        bary,
                     );
                     // use the reciprocal as depth - smaller values = closer
                     let depth = 1.0 / inv_w_interp;
                     // color gradient (perspective-correct interpolation)
-                    // color gradient
                     let pixel_color = interp_perspective_color(colors, clip_w, bary);
 
                     buffer.draw_pixel(x, y, pixel_color, depth);
@@ -1412,15 +1412,8 @@ pub fn project_view_to_clip(point: &Vector4<f32>, buffer: &Buffer, camera: &Came
     // projects a 3D point in view space (camera = origin, facing -z)
     // into 3D clip space (x, y, z) where z is the depth
 
-    let aspect_ratio = buffer.width as f32 / buffer.height as f32;
-    let aspect_scale_matrix: Matrix4<f32> = Matrix4::new(
-        1.0 / aspect_ratio, 0.0, 0.0, 0.0,
-        0.0, 1.0,      0.0, 0.0,
-        0.0, 0.0,      1.0, 0.0,
-        0.0, 0.0,      0.0, 1.0,
-    );
-
-    aspect_scale_matrix * camera.projection_matrix * point
+    let view_projection = create_view_projection_matrix(buffer, camera);
+    view_projection * point
 }
 
 pub fn project_clip_to_ndc(point: &Vector4<f32>) -> Vector4<f32> {
@@ -1441,6 +1434,17 @@ pub fn project_ndc_to_screen(point: &Vector4<f32>, buffer: &Buffer) -> Vector4<f
     // projects a 3D point in normalized device coordinates (NDC)
     // into screen space (pixel coordinates)
     buffer.matrix * point
+}
+
+pub fn create_view_projection_matrix(buffer: &Buffer, camera: &Camera) -> Matrix4<f32> {
+    let aspect_ratio = buffer.width as f32 / buffer.height as f32;
+    let aspect_scale_matrix: Matrix4<f32> = Matrix4::new(
+        1.0 / aspect_ratio, 0.0, 0.0, 0.0,
+        0.0, 1.0,      0.0, 0.0,
+        0.0, 0.0,      1.0, 0.0,
+        0.0, 0.0,      0.0, 1.0,
+    );
+    aspect_scale_matrix * camera.projection_matrix
 }
 
 pub fn is_backface(tri: &[Vector4<f32>; 3], camera: &Camera) -> bool {
@@ -1572,7 +1576,7 @@ pub fn is_fully_outside_ndc(tri: &[Vector4<f32>; 3]) -> bool {
     false
 }
 
-fn compute_clamped_bbox(tri: &[Vector4<f32>; 3], screen_width: f32, screen_height: f32) -> (f32, f32, f32, f32) {
+fn compute_clamped_bbox(tri: &[Vector4<f32>; 3], screen_width: f32, screen_height: f32) -> (usize, usize, usize, usize) {
     let mut xmin = (tri[0].x.min(tri[1].x).min(tri[2].x)).floor();
     let mut xmax = (tri[0].x.max(tri[1].x).max(tri[2].x)).ceil();
     let mut ymin = (tri[0].y.min(tri[1].y).min(tri[2].y)).floor();
@@ -1582,7 +1586,7 @@ fn compute_clamped_bbox(tri: &[Vector4<f32>; 3], screen_width: f32, screen_heigh
     xmax = xmax.min(screen_width - 1.0);
     ymax = ymax.min(screen_height - 1.0);
 
-    (xmin, ymin, xmax, ymax)
+    (xmin as usize, ymin as usize, xmax as usize, ymax as usize)
 }
 
 fn _interp_perspective_scalar(a: (f32, f32, f32), w_clip: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
@@ -1607,32 +1611,37 @@ fn interp_linear_scalar(a: (f32, f32, f32), bary: (f32, f32, f32)) -> f32 {
 
 fn interp_perspective_color(colors: [Color; 3], w_clip: (f32, f32, f32), bary: (f32, f32, f32)) -> Color {
     // performs perspective-correct interpolation of a color
+    use glam::Vec4;
+
+    // use glam for SIMD
+    let c0 = Vec4::new(colors[0].0 as f32, colors[0].1 as f32, colors[0].2 as f32, colors[0].3 as f32);
+    let c1 = Vec4::new(colors[1].0 as f32, colors[1].1 as f32, colors[1].2 as f32, colors[1].3 as f32);
+    let c2 = Vec4::new(colors[2].0 as f32, colors[2].1 as f32, colors[2].2 as f32, colors[2].3 as f32);
+
     let (b0, b1, b2) = bary;
     let (w0_clip, w1_clip, w2_clip) = w_clip;
-    let inv0 = 1.0 / w0_clip;
-    let inv1 = 1.0 / w1_clip;
-    let inv2 = 1.0 / w2_clip;
 
-    // helper to do one color channel
-    let interp_channel = |c0: u8, c1: u8, c2: u8| -> u8 {
-        let a0 = c0 as f32;
-        let a1 = c1 as f32;
-        let a2 = c2 as f32;
-        let num = b0 * (a0 * inv0) + b1 * (a1 * inv1) + b2 * (a2 * inv2);
-        let den = b0 * inv0 + b1 * inv1 + b2 * inv2;
-        if den.abs() < EPSILON {
-            return 0;
-        }
-        let v = num / den;
-        // clamp to [0,255] and round
-        v.clamp(0.0, 255.0).round() as u8
-    };
+    // calculate perspective-correct vertex attributes (Color / w)
+    let c0_persp = c0 / w0_clip;
+    let c1_persp = c1 / w1_clip;
+    let c2_persp = c2 / w2_clip;
 
-    let r = interp_channel(colors[0].0, colors[1].0, colors[2].0);
-    let g = interp_channel(colors[0].1, colors[1].1, colors[2].1);
-    let b = interp_channel(colors[0].2, colors[1].2, colors[2].2);
-    let a = interp_channel(colors[0].3, colors[1].3, colors[2].3);
-    (r, g, b, a)
+    // interpolate the (Color / w) attributes using barycentric coordinates
+    let num_vec = c0_persp.mul_add(Vec4::splat(b0), c1_persp.mul_add(Vec4::splat(b1), c2_persp * b2));
+
+    // calculate the interpolated 1/w for the fragment
+    let interpolated_inv_w = (1.0 / w0_clip) * b0 + (1.0 / w1_clip) * b1 + (1.0 / w2_clip) * b2;
+
+    if interpolated_inv_w.abs() < EPSILON {
+        return (0, 0, 0, 0);
+    }
+
+    // final perspective-correct color by dividing by interpolated 1/w
+    let final_color_vec = num_vec / interpolated_inv_w;
+    
+    // lamp the result to the valid color range [0, 255] and convert back to u8 tuple
+    let clamped = final_color_vec.clamp(Vec4::ZERO, Vec4::splat(255.0)).round();
+    (clamped.x as u8, clamped.y as u8, clamped.z as u8, clamped.w as u8)
 }
 
 pub fn make_ortho_projection(left: f32, right: f32, bottom: f32, top: f32) -> Matrix4<f32> {
