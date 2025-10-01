@@ -119,7 +119,7 @@ pub fn load_object_into_scene(
 fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
     // parse the OBJ file and return a vector of objects
     let content = std::fs::read_to_string(obj_path)
-        .map_err(|e| format!("Failed to read OBJ file: {}", e))?;
+        .map_err(|e| format!("Failed to read OBJ file: {e}"))?;
 
     let mut data = RawObjData::default();
     let mut current_part: Option<ObjectPart> = None;
@@ -138,7 +138,7 @@ fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
                 // vertex position
                 let mut vertex = [0.0; 3];
                 for i in 0..3 {
-                    vertex[i] = tokens[i + 1].parse::<f32>().map_err(|e| format!("Failed to parse vertex: {}", e))?;
+                    vertex[i] = tokens[i + 1].parse::<f32>().map_err(|e| format!("Failed to parse vertex: {e}"))?;
                 }
                 data.vertices.push(vertex);
             },
@@ -146,7 +146,7 @@ fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
                 // texture coordinate
                 let mut tex_coord = [0.0; 2];
                 for i in 0..2 {
-                    tex_coord[i] = tokens[i + 1].parse::<f32>().map_err(|e| format!("Failed to parse texture coordinate: {}", e))?;
+                    tex_coord[i] = tokens[i + 1].parse::<f32>().map_err(|e| format!("Failed to parse texture coordinate: {e}"))?;
                 }
                 data.texture_coords.push(tex_coord);
             }
@@ -154,7 +154,7 @@ fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
                 // vertex normal
                 let mut normal = [0.0; 3];
                 for i in 0..3 {
-                    normal[i] = tokens[i + 1].parse::<f32>().map_err(|e| format!("Failed to parse vertex normal: {}", e))?;
+                    normal[i] = tokens[i + 1].parse::<f32>().map_err(|e| format!("Failed to parse vertex normal: {e}"))?;
                 }
                 data.normals.push(normal);
             }
@@ -217,7 +217,7 @@ fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
                         1 => {
                             // vertex only
                             for token in tokens.iter().skip(1) {
-                                let index = token.parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {}", e))?;
+                                let index = token.parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {e}"))?;
                                 face.vertex_indices.push(index - 1);
                             }
                         }
@@ -228,9 +228,9 @@ fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
                                 if parts.len() < 2 {
                                     return Err("Invalid face format for vertex/texture".to_string());
                                 }
-                                let index = parts[0].parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {}", e))?;
+                                let index = parts[0].parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {e}"))?;
                                 face.vertex_indices.push(index - 1);
-                                let tex_index = parts[1].parse::<u32>().map_err(|e| format!("Failed to parse texture index: {}", e))?;
+                                let tex_index = parts[1].parse::<u32>().map_err(|e| format!("Failed to parse texture index: {e}"))?;
                                 face.texture_indices.push(tex_index - 1);
                             }
                         }
@@ -241,11 +241,11 @@ fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
                                 if parts.len() < 3 {
                                     return Err("Invalid face format for vertex/texture/normal".to_string());
                                 }
-                                let index = parts[0].parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {}", e))?;
+                                let index = parts[0].parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {e}"))?;
                                 face.vertex_indices.push(index - 1);
-                                let tex_index = parts[1].parse::<u32>().map_err(|e| format!("Failed to parse texture index: {}", e))?;
+                                let tex_index = parts[1].parse::<u32>().map_err(|e| format!("Failed to parse texture index: {e}"))?;
                                 face.texture_indices.push(tex_index - 1);
-                                let norm_index = parts[2].parse::<u32>().map_err(|e| format!("Failed to parse normal index: {}", e))?;
+                                let norm_index = parts[2].parse::<u32>().map_err(|e| format!("Failed to parse normal index: {e}"))?;
                                 face.normal_indices.push(norm_index - 1);
                             }
                         }
@@ -256,9 +256,9 @@ fn parse_obj(obj_path: &Path) -> Result<RawObjData, String> {
                                 if parts.len() < 2 {
                                     return Err("Invalid face format for vertex/normal".to_string());
                                 }
-                                let index = parts[0].parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {}", e))?;
+                                let index = parts[0].parse::<u32>().map_err(|e| format!("Failed to parse vertex index: {e}"))?;
                                 face.vertex_indices.push(index - 1);
-                                let norm_index = parts[1].parse::<u32>().map_err(|e| format!("Failed to parse normal index: {}", e))?;
+                                let norm_index = parts[1].parse::<u32>().map_err(|e| format!("Failed to parse normal index: {e}"))?;
                                 face.normal_indices.push(norm_index - 1);
                             }
                         }
@@ -287,14 +287,14 @@ fn parse_mtl(mtl_path: &Path) -> Result<HashMap<String, Material>, String> {
         if tokens.len() < 3 {
             return Err("Not enough values for color".to_string());
         }
-        let r = tokens[0].parse::<f32>().map_err(|e| format!("Failed to parse color value: {}", e))?;
-        let g = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse color value: {}", e))?;
-        let b = tokens[2].parse::<f32>().map_err(|e| format!("Failed to parse color value: {}", e))?;
+        let r = tokens[0].parse::<f32>().map_err(|e| format!("Failed to parse color value: {e}"))?;
+        let g = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse color value: {e}"))?;
+        let b = tokens[2].parse::<f32>().map_err(|e| format!("Failed to parse color value: {e}"))?;
         Ok([r, g, b])
     }
 
     let content = std::fs::read_to_string(mtl_path)
-        .map_err(|e| format!("Failed to read MTL file: {}", e))?;
+        .map_err(|e| format!("Failed to read MTL file: {e}"))?;
 
     let mut materials: Vec<Material> = Vec::new();
     let mut current_material: Option<Material> = None;
@@ -338,19 +338,19 @@ fn parse_mtl(mtl_path: &Path) -> Result<HashMap<String, Material>, String> {
             "Pr" => {
                 // roughness
                 if let Some(material) = current_material.as_mut() {
-                    material.roughness = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse roughness: {}", e))?;
+                    material.roughness = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse roughness: {e}"))?;
                 }
             }
             "Pl" => {
                 // clearcoat
                 if let Some(material) = current_material.as_mut() {
-                    material.clearcoat = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse clearcoat: {}", e))?;
+                    material.clearcoat = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse clearcoat: {e}"))?;
                 }
             }
             "Pds" => {
                 // sheen
                 if let Some(material) = current_material.as_mut() {
-                    material.sheen = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse sheen: {}", e))?;
+                    material.sheen = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse sheen: {e}"))?;
                 }
             }
             "Tf" => {
@@ -362,13 +362,13 @@ fn parse_mtl(mtl_path: &Path) -> Result<HashMap<String, Material>, String> {
             "Tr" => {
                 // transparency
                 if let Some(material) = current_material.as_mut() {
-                    material.transparency = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse transparency: {}", e))?;
+                    material.transparency = tokens[1].parse::<f32>().map_err(|e| format!("Failed to parse transparency: {e}"))?;
                 }
             }
             "illum" => {
                 // illumination model
                 if let Some(material) = current_material.as_mut() {
-                    material.illumination_model = tokens[1].parse::<u32>().map_err(|e| format!("Failed to parse illumination model: {}", e))?;
+                    material.illumination_model = tokens[1].parse::<u32>().map_err(|e| format!("Failed to parse illumination model: {e}"))?;
                 }
             }
             _ => {
@@ -376,7 +376,7 @@ fn parse_mtl(mtl_path: &Path) -> Result<HashMap<String, Material>, String> {
                 for token in tokens.iter() {
                     print = print + " {" + token + "}";
                 }
-                println!("Unknown material property: {}", print);
+                println!("Unknown material property: {print}");
             }
         }
     }

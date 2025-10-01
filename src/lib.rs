@@ -1,1744 +1,892 @@
-// #![allow(unused)]
+#![allow(unused)]
+
+use std::{io::Write, mem::ManuallyDrop};
+use minifb::KeyRepeat;
+use wgpu::util::DeviceExt;
+use image::GenericImageView;
 pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
-use nalgebra::{Matrix4, Point3, Rotation3, UnitQuaternion, Vector3, Vector4};
-use rand::Rng;
-use slotmap::{SlotMap, new_key_type};
-use std::ops::Mul;
+use cgmath::prelude::*;
+use std::time::Instant;
 
-pub mod object_import;
 pub mod window;
+pub mod texture;
+pub mod model;
+mod resources;
 
-use object_import::*;
+use window::*;
+use texture::*;
+use model::*;
 
-// region codes, used for clipping
-const INSIDE: u32 = 0b0000;
-const LEFT: u32 = 0b0001;
-const RIGHT: u32 = 0b0010;
-const BOTTOM: u32 = 0b0100;
-const TOP: u32 = 0b1000;
-
-const EPSILON: f32 = 1e-6;
-
-pub type Color = (u8, u8, u8, u8); // RGBA format
-pub type Point3D = (f32, f32, f32); // 3D coordinates
-pub type Triangle = [Point3D; 3]; // 3D triangle defined by 3 vertices
-pub type Line3D = (Point3D, Point3D); // 3D line segment defined by end points
+// for instancing test
+const NUM_INSTANCES_PER_ROW: u32 = 10;
+const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+    0.0,
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+);
+// starting window size
+const WIDTH: usize = 640;
+const HEIGHT: usize = 480;
 
 
-// Unique IDs for various objects
-new_key_type! {
-    pub struct NodeId;
-    pub struct MeshId;
-    pub struct PrismId;
-    pub struct MaterialId;
+// a struct to hold real-time debug information
+struct DebugInfo {
+    last_update: Instant,
+    frame_count: u32, // for fps calc
+    fps: f32,
+    pub draw_calls: u32,
+    pub rendered_tris: u32,
+    pub total_frames: u32,
 }
 
-#[derive(Clone, Default)]
-pub struct Buffer {
-    pub width: usize,
-    pub height: usize,
-    pub color_buffer: Vec<Color>, // RGBA format
-    pub depth_buffer: Vec<f32>, // depth value for z-buffering
-    pub matrix: Matrix4<f32>, // transformation matrix
+impl DebugInfo {
+    fn new() -> Self {
+        Self {
+            last_update: Instant::now(),
+            frame_count: 0,
+            fps: 0.0,
+            draw_calls: 0,
+            rendered_tris: 0,
+            total_frames: 0,
+        }
+    }
+
+    // this will be called every frame from our main loop
+    fn update(&mut self) {
+        self.frame_count += 1;
+        self.total_frames += 1;
+        let elapsed = self.last_update.elapsed().as_secs_f32();
+
+        // update the stats every half-second
+        if elapsed >= 0.5 {
+            self.fps = self.frame_count as f32 / elapsed;
+            self.frame_count = 0;
+            self.last_update = Instant::now();
+        }
+    }
 }
 
-impl Buffer {
-    const CLEAR_COLOR: Color = (0, 0, 0, 0);  // transparent black
-    const CLEAR_DEPTH: f32 = f32::INFINITY; // max depth
 
-    pub fn new(width: usize, height: usize) -> Self {
-        let mut buffer = Self {
-            width,
-            height,
-            color_buffer: vec![Self::CLEAR_COLOR; width * height],
-            depth_buffer: vec![Self::CLEAR_DEPTH; width * height],
-            matrix: Matrix4::identity()
-        };
-        buffer.update_matrix();
-        buffer
-    }
+struct Application<'a> {
+    // the minifb window object onscreen
+    window: Window,
 
-    fn update_matrix(&mut self) {
-        let (w, h) = (self.width as f32, self.height as f32);
-        // scale matrix: scale x by w/2, and y by -h/2
-        let scale_matrix: Matrix4<f32> = Matrix4::new(
-            w / 2.0, 0.0, 0.0, 0.0,
-            0.0, -h / 2.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        );
+    // the drawable part of the window, like the "canvas"
+    surface: ManuallyDrop<wgpu::Surface<'a>>,
 
-        // translation matrix: translate by (w/2, h/2)
-        let translation_matrix: Matrix4<f32> = Matrix4::new(
-            1.0, 0.0, 0.0, w / 2.0,
-            0.0, 1.0, 0.0, h / 2.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        );
+    // how the pixels on the surface are stored in memory
+    surface_format: wgpu::TextureFormat,
 
-        self.matrix = translation_matrix * scale_matrix;
-    }
+    // handle to the physical GPU hardware
+    adapter: wgpu::Adapter,
 
-    #[inline]
-    pub fn index(&self, x: usize, y: usize) -> usize {
-        // px coords -> 1D array index
-        y * self.width + x
-    }
+    // the software interface connection to the GPU
+    // to send commands or create resources (buffers/textures/pipelines)
+    device: wgpu::Device,
 
-    pub fn draw_pixel(&mut self, x: usize, y: usize, color: Color, depth: f32) {
-        if x < self.width && y < self.height {
-            let idx = self.index(x, y);
-            let pixel = &mut self.color_buffer[idx];
-            if depth < self.depth_buffer[idx] {
-                *pixel = color;
-                self.depth_buffer[idx] = depth;
-            }
+    // the channel to submit commands (like drawing instructions) for the GPU to execute
+    queue: wgpu::Queue,
+
+    // configuration for the surface, like width, height,
+    // surface_format, present_mode (vsync) etc.
+    // needs to be updated when anything changes (like resizing)
+    config: wgpu::SurfaceConfiguration,
+
+    // complete, pre-configured state object that defines how to draw
+    // bundles: vertex/fragment shader, vertex data layout, type of primitive (tri),
+    // settings for depth testing, color blending, etc.
+    // by bundling, the GPU can swap render pipelines insanely fast
+    render_pipeline: wgpu::RenderPipeline,
+
+    #[allow(dead_code)]
+    diffuse_texture: texture::Texture,
+    diffuse_bind_group: wgpu::BindGroup,
+
+    camera: Camera,
+    camera_controller: CameraController,
+    camera_uniform: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+
+    instances: Vec<Instance>,
+    #[allow(dead_code)]
+    instance_buffer: wgpu::Buffer,
+    depth_texture: texture::Texture,
+
+    obj_model: Model,
+
+    debug: DebugInfo,
+}
+
+impl Drop for Application<'_> {
+    // the surface object is fundamentally linked to the window;
+    // the surface contains pointers to the OS level window.
+    // we NEED the surface to be dropped before the window, or crashes occur,
+    // so we define a manual drop method here to drop the surface first
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.surface);
         }
     }
+}
 
-    pub fn get_pixel(&self, x: usize, y: usize) -> Option<&Color> {
-        if x < self.width && y < self.height {
-            let idx = self.index(x, y);
-            Some(&self.color_buffer[idx])
-        } else {
-            None
+impl Application<'_> {
+    async fn new() -> Self {
+        // init wgpu handle
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY, // selects best available graphics API
+            ..Default::default()
+        });
+
+        // create the physical window
+        let window = Window::new(
+            "awesome window",
+            WIDTH,
+            HEIGHT,
+            WindowOptions {
+                resize: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!("{}", e);
+        });
+
+        // mini_fb's window type isn't `Send` which is required for wgpu's `WindowHandle` trait
+        // so have to use the unsafe variant to create a surface directly from the window handle
+        // - the window handles are valid at this point
+        // - the window is guranteed to outlive the surface since we're ensuring so in `Application's` Drop impl
+        let surface = unsafe {
+            instance.create_surface_unsafe(
+                wgpu::SurfaceTargetUnsafe::from_window(&window.inner)
+                    .expect("Failed to create surface target."),
+            )
         }
-    }
+        .expect("Failed to create surface");
 
-    pub fn merge(&mut self, other: &Buffer) {
-        if self.width != other.width || self.height != other.height {
-            panic!("Buffers must have the same dimensions to merge.");
-        }
-
-        for i in 0..self.color_buffer.len() {
-            if other.depth_buffer[i] < self.depth_buffer[i] {
-                self.color_buffer[i] = other.color_buffer[i];
-                self.depth_buffer[i] = other.depth_buffer[i];
-            }
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.color_buffer.fill(Self::CLEAR_COLOR);
-        self.depth_buffer.fill(Self::CLEAR_DEPTH);
-    }
-
-    pub fn clear_color(&mut self, color: Color) {
-        // clear buffer with a specific color
-        self.color_buffer.fill(color);
-        self.depth_buffer.fill(f32::INFINITY); // reset depth to max
-    }
-
-    pub fn reset_depth(&mut self) {
-        // reset depth values to max
-        self.depth_buffer.fill(f32::INFINITY);
-    }
-
-    pub fn to_raw(&self) -> Vec<u32> {
-        // convert to flat array of u32 in ARGB format
-        self.color_buffer
-            .iter()
-            .map(|pixel| {
-                  (pixel.3 as u32) << 24
-                | (pixel.0 as u32) << 16
-                | (pixel.1 as u32) << 8
-                | (pixel.2 as u32)
+        // get the handle to the physical GPU
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(), // HighPerformance, LowPower
+                compatible_surface: Some(&surface), // make sure the gpu use our surface
+                force_fallback_adapter: false,
             })
-            .collect()
-    }
-}
+            .await.expect("Failed to find an appropriate adapter");
+        log::info!("Created wgpu adapter: {:?}", adapter.get_info());
 
-#[derive(Default)]
-pub struct Scene {
-    pub camera: Camera,
-    pub nodes: SlotMap<NodeId, Node>,
-    pub meshes: SlotMap<MeshId, MeshComponent>,
-    pub prisms: SlotMap<PrismId, RectangularPrismComponent>,
-    pub materials: SlotMap<MaterialId, Material>,
-}
+        // get a logical connection to the gpu
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("Device"),
+                    required_features: wgpu::Features::empty(),
+                    // disable some features if WebGL
+                    required_limits: if cfg!(target_arch = "wasm32") {
+                        wgpu::Limits::downlevel_webgl2_defaults()
+                    } else {
+                        wgpu::Limits::default()
+                    },
+                    memory_hints: Default::default(),
+                    trace: wgpu::Trace::Off,
+            })
+            .await
+            .expect("Failed to create device");
 
-impl Scene {
-    pub fn new(camera: Camera) -> Self {
-        Self {
-            camera,
-            ..Default::default()
-        }
-    }
+        // make all errors forward to the console before panicking so they also show up on the web
+        device.on_uncaptured_error(Box::new(|err| {
+            log::error!("{err}");
+            panic!("{}", err);
+        }));
 
-    pub fn add_node(
-        &mut self,
-        name: &str,
-        transform: Transform,
-        kind: Option<ObjectKind>,
-        parent: Option<NodeId>,
-    ) -> NodeId {
-        // Adds a new node to the scene and returns its unique ID
-        let node = Node {
-            name: name.to_string(),
-            transform,
-            parent,
-            children: Vec::new(),
-            kind,
+        // get what the GPU is capable of (formats, vsync modes, etc.)
+        let surface_caps = surface.get_capabilities(&adapter);
+
+        // try to get sRGB format for consistent colors
+        let surface_format = surface_caps.formats.iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        // different settings for the surface
+        let config = wgpu::SurfaceConfiguration {
+            // tell GPU that the primary use for this surface's textures
+            // is to be drawn into, like an attachment in a render pass
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT, 
+            format: surface_format,
+            width: window.get_size().0 as u32,
+            height: window.get_size().1 as u32,
+            // controls VSync; should be Fifo (standard VSync)
+            present_mode: surface_caps.present_modes[0],
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         };
-        // Insert node into slotmap and get its key/ID
-        let id = self.nodes.insert(node);
 
-        // If parent exists, update the parent's children list
-        if let Some(parent_id) = parent {
-            self.nodes[parent_id].children.push(id);
-        }
+        // grab the bytes from our image file and load them into an image, convert to Vec of RGBA bytes
+        let diffuse_bytes = include_bytes!("../assets/images/happy-tree.png");
+        let diffuse_texture = Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
 
-        id
-    }
-
-    pub fn get_node_id(&self, name: &str) -> Option<NodeId> {
-        self.nodes.iter().find_map(|(id, node)| {
-            if node.name == name {
-                Some(id)
-            } else {
-                None
+        let texture_bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    // sampled texture at binding 0
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        // these can only be used in fragment shader
+                        // can be any bitwise combination of NONE, VERTEX, FRAGMENT, COMPUTE
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    // sampler at binding 1
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        // should match filterable field from above entry
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
             }
-        })
-    }
+        );
 
-    pub fn get_world_transform(&self, id: NodeId) -> Transform {
-        // Recursively calculates the world transform of a node by walking up the parent chain
-        // get the node or return identity transform
-        if let Some(node) = self.nodes.get(id) {
-            let mut transform = node.transform;
-            let mut current_parent = node.parent;
+        // a bind group describes a set of resources and how they can be accessed by the shader
+        // this is separate from the layout because it allows us to swap bind groups
+        // on the fly given they share the same layout
+        // each texture/sampler has to be added to a bind group; we'll just make a new one for each
+        let diffuse_bind_group = device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                    },
+                ],
+                label: Some("diffuse_bind_group"),
+            }
+        );
 
-            // loop up the heirarchy, multiplying transforms
-            while let Some(parent_id) = current_parent {
-                if let Some(parent_node) = self.nodes.get(parent_id) {
-                    transform = parent_node.transform * transform;
-                    current_parent = parent_node.parent;
+        // camera instancing
+        let camera = Camera {
+            eye: (0.0, 5.0, 10.0).into(),
+            target: (0.0, 0.0, 0.0).into(),
+            up: cgmath::Vector3::unit_y(),
+            aspect: config.width as f32 / config.height as f32,
+            fovy: 45.0,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+        let camera_controller = CameraController::new(0.2);
+ 
+        // create camera uniform so we can use our camera data in shaders
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update_view_proj(&camera);
+        let camera_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Camera Buffer"),
+                contents: bytemuck::cast_slice(&[camera_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+        let camera_bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    // only use in vertex shader
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        // means the location of the data in the buffer can change, like if you
+                        // store multiple data sets that vary in size in a single buffer
+                        // if true, you have to specify the offsets later
+                        has_dynamic_offset: false,
+                        // the smallest size the buffer can be; don't rlly need to specify
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("camera_bind_group_layout"),
+            }
+        );
+ 
+        let camera_bind_group = device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &camera_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                }],
+                label: Some("camera_bind_group"),
+            }
+        );
+
+        let obj_model =
+            resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout)
+                .await
+                .unwrap();
+
+        const SPACE_BETWEEN: f32 = 3.0;
+        let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
+            (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+                let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+
+                let position = cgmath::Vector3 { x, y: 0.0, z };
+
+                let rotation = if position.is_zero() {
+                    cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0))
                 } else {
-                    break; // parent not found
+                    cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
+                };
+
+                Instance {
+                    position, rotation,
                 }
-            }
-            transform
-        } else {
-            Transform::identity()
-        }
-    }
-
-    pub fn delete_node(&mut self, id: NodeId) {
-        // Recursively deletes a node and all of its children
-        // clone the list of children IDs
-        let children_to_delete = self.nodes.get(id).map_or(Vec::new(), |n| n.children.clone());
-
-        for child_id in children_to_delete {
-            // recursively delete children
-            self.delete_node(child_id);
-        }
-
-        // remove the node itself
-        if let Some(removed_node) = self.nodes.remove(id) {
-            // remove node from parent's children list
-            if let Some(parent_id) = removed_node.parent
-                && let Some(parent_node) = self.nodes.get_mut(parent_id) {
-                    parent_node.children.retain(|&child_id| child_id != id);
-                }
-        }
-    }
-
-    pub fn move_node(&mut self, id: NodeId, delta: (f32, f32, f32)) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.transform.position.x += delta.0;
-            node.transform.position.y += delta.1;
-            node.transform.position.z += delta.2;
-        }
-    }
-
-    pub fn set_node_position(&mut self, id: NodeId, position: Position) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.transform.position = position;
-        }
-    }
-
-    pub fn get_node_position(&self, id: NodeId) -> Option<Position> {
-        self.nodes.get(id).map(|node| node.transform.position)
-    }
-
-    pub fn rotate_node(&mut self, id: NodeId, rotation: (f32, f32, f32)) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.transform.rotation.pitch += rotation.0;
-            node.transform.rotation.yaw += rotation.1;
-            node.transform.rotation.roll += rotation.2;
-        }
-    }
-
-    pub fn set_node_rotation(&mut self, id: NodeId, rotation: Rotation) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.transform.rotation = rotation;
-        }
-    }
-
-    pub fn get_node_rotation(&self, id: NodeId) -> Option<Rotation> {
-        self.nodes.get(id).map(|node| node.transform.rotation)
-    }
-
-    pub fn scale_node(&mut self, id: NodeId, scale: (f32, f32, f32)) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.transform.scale.x *= scale.0;
-            node.transform.scale.y *= scale.1;
-            node.transform.scale.z *= scale.2;
-        }
-    }
-
-    pub fn set_node_scale(&mut self, id: NodeId, scale: Scale) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.transform.scale = scale;
-        }
-    }
-
-    pub fn get_node_scale(&self, id: NodeId) -> Option<Scale> {
-        self.nodes.get(id).map(|node| node.transform.scale)
-    }
-
-    // TODO: add rotation + scale
-
-    pub fn get_node_world_tris(&self, id: NodeId) -> Option<Vec<Triangle>> {
-        let node = self.nodes.get(id)?;
-        let kind = node.kind?;
-
-        // get the local space tris based on the object kind
-        let local_tris = match kind {
-            ObjectKind::Mesh(mesh_id) => {
-                let mesh = self.meshes.get(mesh_id)?;
-                mesh.get_local_tris()
-            }
-            ObjectKind::RectangularPrism(prism_id) => {
-                let prism = self.prisms.get(prism_id)?;
-                prism.tris()
-            }
-        };
-
-        // get the node's final world transform matrix
-        let world_transform_matrix = self.get_world_transform_matrix(id);
-
-        // apply the world transform to every vertex of every tri
-        let world_tris = local_tris.into_iter().map(|tri| {
-            let p0 = world_transform_matrix.transform_point(&Point3::new(tri[0].0, tri[0].1, tri[0].2));
-            let p1 = world_transform_matrix.transform_point(&Point3::new(tri[1].0, tri[1].1, tri[1].2));
-            let p2 = world_transform_matrix.transform_point(&Point3::new(tri[2].0, tri[2].1, tri[2].2));
-            [
-                (p0.x, p0.y, p0.z),
-                (p1.x, p1.y, p1.z),
-                (p2.x, p2.y, p2.z),
-            ]
-        }).collect();
-
-        Some(world_tris)
-    }
-
-    pub fn get_world_transform_matrix(&self, node_id: NodeId) -> Matrix4<f32> {
-        // Calculates the final world-space transformation matrix for a given node
-        // It does this by traversing up the scene graph from the node to the root,
-        // accumulating transforms along the way
-
-        // start with the local transform of the requested node
-        // if the ID is invalid, start with an identity matrix
-        let mut current_transform = self.nodes.get(node_id)
-            .map_or(Matrix4::identity(), |n| n.transform.to_matrix());
-
-        // get the parent of the starting node
-        let mut maybe_parent_id = self.nodes.get(node_id).and_then(|n| n.parent);
-
-        // loop up the heirarchy until we reach a node with no parent (root node)
-        while let Some(parent_id) = maybe_parent_id {
-            if let Some(parent_node) = self.nodes.get(parent_id) {
-                // pre-multiply by the parent's transform
-                current_transform = parent_node.transform.to_matrix() * current_transform;
-
-                maybe_parent_id = parent_node.parent;
-            } else {
-                // parent id was invalid for some reason so stop
-                break;
-            }
-        }
-
-        current_transform
-    }
-
-    pub fn add_prism(
-        &mut self,
-        name: &str,
-        transform: Transform,
-        size: (f32, f32, f32),
-        parent: Option<NodeId>,
-    ) -> NodeId {
-        // create the data component
-        let prism_component = RectangularPrismComponent {
-            size,
-            ..Default::default()
-        };
-
-        // add the component to its arena to get an ID
-        let prism_id = self.prisms.insert(prism_component);
-
-        // create the node that links the transform to the data
-        let node = Node {
-            name: name.to_string(),
-            transform,
-            parent,
-            children: Vec::new(),
-            kind: Some(ObjectKind::RectangularPrism(prism_id)),
-        };
-
-        // add the node to the scene graph and update its parent
-        let node_id = self.nodes.insert(node);
-        if let Some(parent_id) = parent
-            && let Some(parent_node) = self.nodes.get_mut(parent_id) {
-                parent_node.children.push(node_id);
-            }
-
-        node_id
-    }
-
-    pub fn render(&self, buffer: &mut Buffer) {
-        const TYPE: &str = "full"; // "full", "wireframe", "points"
-
-        let view_projection = create_view_projection_matrix(buffer, &self.camera);
-
-        // iterate through every node in the scene graph
-        for (node_id, node) in self.nodes.iter() {
-            // skip nodes that don't have any geometry
-            let Some(object_kind) = node.kind else {
-                continue;
-            };
-
-            let local_tris: Vec<Triangle>;
-            // color per vertex of one triangle
-            let mut tri_colors: Option<[Color; 3]> = None;
-
-            match object_kind {
-                ObjectKind::Mesh(mesh_id) => {
-                    if let Some(mesh) = self.meshes.get(mesh_id) {
-                        local_tris = mesh.get_local_tris();
-
-                        // apply material color
-                        if let Some(material_id) = mesh.material_id
-                            && let Some(material) = self.materials.get(material_id) {
-                                // use the diffuse color (Kd) for shading
-                                // convert from [0.0, 1.0] float to (u8, u8, u8, u8)
-                                let r = (material.diffuse_color[0] * 255.0).round() as u8;
-                                let g = (material.diffuse_color[1] * 255.0).round() as u8;
-                                let b = (material.diffuse_color[2] * 255.0).round() as u8;
-                                
-                                // for now, apply the same color to all vertices of the triangle
-                                tri_colors = Some([(r, g, b, 255), (r, g, b, 255), (r, g, b, 255)]);
-                            }
-                    } else {
-                        continue;
-                    }
-                }
-                ObjectKind::RectangularPrism(prism_id) => {
-                    if let Some(prism) = self.prisms.get(prism_id) {
-                        local_tris = prism.tris();
-                    } else {
-                        continue;
-                    };
-                }
-            }
-
-            // get the final transformation matrix for this node
-            let world_transform_matrix = self.get_world_transform_matrix(node_id);
-
-            // draw wiremesh edges
-            if TYPE == "wireframe" {
-                // apply the world transform to the local triangle
-                for tri in &local_tris {
-                    let p0 = world_transform_matrix
-                        .transform_point(&Point3::new(tri[0].0, tri[0].1, tri[0].2));
-                    let p1 = world_transform_matrix
-                        .transform_point(&Point3::new(tri[1].0, tri[1].1, tri[1].2));
-                    let p2 = world_transform_matrix
-                        .transform_point(&Point3::new(tri[2].0, tri[2].1, tri[2].2));
-                    let world_tri = [(p0.x, p0.y, p0.z), (p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z)];
-
-                    // For a triangle, the edges are always (0,1), (1,2), (2,0)
-                    let tri_edges = [(0, 1), (1, 2), (2, 0)];
-                    for &(i0, i1) in tri_edges.iter() {
-                        let v1 = world_tri[i0];
-                        let v2 = world_tri[i1];
-
-                        // Try to clip the line in 3D space before projection
-                        if let Some((clipped_v1, clipped_v2)) = clip_line_to_camera_plane(v1, v2, &self.camera) {
-                            // Project the clipped endpoints
-                            if let (Some(p1), Some(p2)) = (
-                                project_to_screen_space(&clipped_v1, &self.camera, buffer),
-                                project_to_screen_space(&clipped_v2, &self.camera, buffer)
-                            ) {
-                                let color: Color = (255, 255, 255, 255);
-                                draw_line(buffer, (p1.0, p1.1), (p2.0, p2.1), color);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // draw filled triangles
-            if TYPE == "full" {
-                // apply the world transform to the local triangle
-                for (i, tri) in local_tris.iter().enumerate() {
-                    let p0 = world_transform_matrix
-                        .transform_point(&Point3::new(tri[0].0, tri[0].1, tri[0].2));
-                    let p1 = world_transform_matrix
-                        .transform_point(&Point3::new(tri[1].0, tri[1].1, tri[1].2));
-                    let p2 = world_transform_matrix
-                        .transform_point(&Point3::new(tri[2].0, tri[2].1, tri[2].2));
-                    let world_tri = [(p0.x, p0.y, p0.z), (p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z)];
-
-                    let color_data = match object_kind {
-                        ObjectKind::Mesh(_) => {
-                            // use the material color if available, otherwise fallback
-                            // tri_colors.unwrap_or_else(|| [
-                            //     random_color_seeded(i as u64 * 3),
-                            //     random_color_seeded(i as u64 * 3 + 1),
-                            //     random_color_seeded(i as u64 * 3 + 2),
-                            // ])
-                            tri_colors.unwrap_or([
-                                (0, 0, 0, 255),
-                                (0, 0, 0, 255),
-                                (0, 0, 0, 255),
-                            ])
-                        }
-                        ObjectKind::RectangularPrism(prism_id) => {
-                            // use the prism's specific per-triangle colors
-                            self.prisms[prism_id].tri_colors[i % 12]
-                        }
-                    };
-                    render_tri(buffer, &self.camera, &world_tri, color_data, &view_projection);
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Projection {
-    Perspective,
-    Orthographic,
-}
-
-#[derive(Clone, Copy)]
-pub struct Camera {
-    transform: Transform,
-    fov: f32, // field of view in degrees
-    near: f32, // near clipping plane
-    far: f32,  // far clipping plane
-    projection: Projection, // projection type
-    ortho_size: f32, // orthographic size (for orthographic projection)
-    transform_matrix: Matrix4<f32>,
-    projection_matrix: Matrix4<f32>,
-}
-
-impl Camera {
-    pub fn new(position: Position, rotation: Rotation, scale: Scale, fov: f32, near: f32, far: f32) -> Self {
-        let mut camera = Self { 
-            transform: Transform {
-                position,
-                rotation,
-                scale,
-            },
-            transform_matrix: Matrix4::identity(),
-            projection_matrix: Matrix4::identity(),
-            fov,
-            near,
-            far,
-            ortho_size: 50.0,
-            projection: Projection::Perspective
-        };
-        camera.update_matrix();
-        camera
-    }
-    
-    fn update_matrix(&mut self) {
-        // translation matrix
-        let translation_matrix: Matrix4<f32> = Matrix4::new(
-            1.0, 0.0, 0.0, -self.transform.position.x,
-            0.0, 1.0, 0.0, -self.transform.position.y,
-            0.0, 0.0, 1.0, -self.transform.position.z,
-            0.0, 0.0, 0.0, 1.0
-        );
-
-        // yaw (rotation around y-axis)
-        let (yaw_sin, yaw_cos) = self.transform.rotation.yaw.to_radians().sin_cos();
-        let yaw_matrix: Matrix4<f32> = Matrix4::new(
-            yaw_cos, 0.0, yaw_sin, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            -yaw_sin, 0.0, yaw_cos, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        );
-
-        // pitch (rotation around x-axis)
-        let (pitch_sin, pitch_cos) = self.transform.rotation.pitch.to_radians().sin_cos();
-        let pitch_matrix: Matrix4<f32> = Matrix4::new(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, pitch_cos, -pitch_sin, 0.0,
-            0.0, pitch_sin, pitch_cos, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        );
-
-        // roll (rotation around z-axis)
-        let (roll_sin, roll_cos) = self.transform.rotation.roll.to_radians().sin_cos();
-        let roll_matrix: Matrix4<f32> = Matrix4::new(
-            roll_cos, -roll_sin, 0.0, 0.0,
-            roll_sin, roll_cos, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        );
-        self.transform_matrix = roll_matrix * pitch_matrix * yaw_matrix * translation_matrix;
-
-        // projection matrix
-        if self.projection == Projection::Orthographic {
-            // orthographic projection
-            let size = self.ortho_size; // vertical size of view
-            let top = size / 2.0;
-            let bottom = -top;
-            let right = top;
-            let left = -right;
-            self.projection_matrix = make_ortho_projection(left, right, bottom, top);
-        } else {
-            // perspective projection
-            let f = 1.0 / (self.fov.to_radians() / 2.0).tan();
-            let n = self.near;
-            let far = self.far;
-            self.projection_matrix = Matrix4::new(
-                f,   0.0, 0.0, 0.0,
-                0.0, f,   0.0, 0.0,
-                0.0, 0.0, (far + n) / (n - far), (2.0 * far * n) / (n - far),
-                0.0, 0.0, -1.0, 0.0,
-            );
-        }
-    }
-
-    pub fn set_projection(&mut self, projection: Projection) {
-        self.projection = projection;
-        self.update_matrix();
-    }
-
-    pub fn projection(&self) -> Projection {
-        self.projection
-    }
-
-    pub fn set_fov(&mut self, fov: f32) {
-        self.fov = fov.clamp(1.0, 179.0); // clamp to valid range
-        self.update_matrix();
-    }
-
-    pub fn fov(&self) -> f32 {
-        self.fov
-    }
-
-    pub fn set_near(&mut self, near: f32) {
-        self.near = near.max(0.01);
-        self.update_matrix();
-    }
-    pub fn near(&self) -> f32 {
-        self.near
-    }
-    pub fn set_far(&mut self, far: f32) {
-        self.far = far.max(0.01);
-        self.update_matrix();
-    }
-    pub fn far(&self) -> f32 {
-        self.far
-    }
-
-    pub fn set_position(&mut self, position: Position) {
-        self.transform.position = position;
-        self.update_matrix();
-    }
-
-    pub fn position(&self) -> Position {
-        self.transform.position
-    }
-
-    pub fn set_rotation(&mut self, rotation: Rotation) {
-        self.transform.rotation = Rotation {
-            // clamp camera pitch to prevent flipping
-            pitch: rotation.pitch.clamp(-89.0, 89.0),
-            yaw: rotation.yaw,
-            roll: rotation.roll,
-        };
-        self.update_matrix();
-    }
-
-    pub fn rotation(&self) -> Rotation {
-        self.transform.rotation
-    }
-    pub fn pitch(&self) -> f32 { self.transform.rotation.pitch }
-    pub fn yaw(&self) -> f32 { self.transform.rotation.yaw }
-    pub fn roll(&self) -> f32 { self.transform.rotation.roll }
-
-    pub fn r#move(&mut self, x: f32, y: f32, z: f32) {
-        let position = self.transform.position;
-        self.set_position(Position {
-            x: position.x + x,
-            y: position.y + y,
-            z: position.z + z,
+            })
+        }).collect::<Vec<_>>();
+ 
+        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&instance_data),
+            usage: wgpu::BufferUsages::VERTEX,
         });
-    }
 
-    pub fn rotate(&mut self, pitch: f32, yaw: f32, roll: f32) {
-        let rotation = self.transform.rotation;
-        self.set_rotation(Rotation {
-            pitch: rotation.pitch + pitch,
-            yaw: rotation.yaw + yaw,
-            roll: rotation.roll + roll,
+        // create our depth texture for correct z rendering
+        let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texture");
+
+        // load/check shader at compile time
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../assets/shaders/shader.wgsl"));
+
+        // the pipeline layout defines the interface between the pipeline
+        // and the external GPU resources (textures, uniforms, storage buffers)
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                // a bind group is a way to group resources that a shader needs access to
+                // ex. a group for scene data, material-specific data
+                bind_group_layouts: &[
+                    &texture_bind_group_layout,
+                    &camera_bind_group_layout
+                ],
+                // a way to send very small amounts of data to shaders very quickly, but limited
+                push_constant_ranges: &[],
+            });
+
+        // bring the shaders, data layout, and state settings together into a pipeline object
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            // configures the vertex stage of the pipeline
+            vertex: wgpu::VertexState {
+                module: &shader,
+                // start at function `vs_main` in the shader
+                entry_point: Some("vs_main"),
+                // tells the pipeline how the vertex buffer data is laid out
+                buffers: &[
+                    model::ModelVertex::desc(),
+                    InstanceRaw::desc(),
+                ],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            // configures the vertex stage of the pipeline
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                // start at function `fs_main` in the shader
+                entry_point: Some("fs_main"),
+                // defines what the fragment shader is writing its output to
+                targets: &[
+                    // defines a single output buffer (texture)
+                    Some(wgpu::ColorTargetState {
+                        // must match format of surface (sanity check)
+                        format: config.format,
+                        // REPLACE: when the shader outputs a color, replace the previous color
+                        // ALPHABLENDING: combine new color with old color based on transparency 
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        // can write to all color channels (rgba)
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            // tells the GPU's rasterizer stage how to interpret vertex data
+            primitive: wgpu::PrimitiveState {
+                // take buffer vertices 3 at a time as a list of independent triangles
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw, // winding rotation
+                cull_mode: Some(wgpu::Face::Back), // dont render triangles facing away
+                // how to fill the triangles
+                // Fill: color whole triangle
+                // Line: wireframe
+                // Point: draw points at vertices
+                // Line/Point requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: wgpu::PolygonMode::Fill,
+                // dont clip outside depth range 0.0-1.0; requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // normally pixels are shaded if center falls inside triangle
+                // this will shade if any part of pixel lies inside triangle
+                // requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+            // configure depth/stencil buffers
+            // depth buffer: a texture that stores the depth of every pixel
+            // stencil buffer: lets you perform masking operations
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: texture::Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                // tells us when pixels are discarded
+                // Less: pixels will be drawn front to back
+                // other options: Never, Less, Equal, LessEqual,
+                // Greater, NotEqual, GreaterEqual, Always
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            // configures Multi-Sample Anti-Aliasing (MSAA)
+            multisample: wgpu::MultisampleState {
+                // amount of samples per pixel; 1 = not using MSAA
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            // render to multiple views (texture layers) in a single draw; used for VR
+            multiview: None,
+            cache: None,
         });
-    }
 
-    pub fn ortho(&self) -> f32 {
-        self.ortho_size
-    }
+        // // allocate buffers on the GPU's VRAM and copy our data across
+        // let vertex_buffer = device.create_buffer_init(
+        //     &wgpu::util::BufferInitDescriptor {
+        //         label: Some("Vertex Buffer"),
+        //         // our data to be copied; bytemuck safely converts &[Vertex] into &[u8]
+        //         contents: bytemuck::cast_slice(VERTICES),
+        //         // tell GPU that this buffer is for vertex data during draw calls
+        //         // this puts it in a memory region optimized for fast reads by shader cores
+        //         // if writing to buffer from CPU often, use COPY_DST
+        //         usage: wgpu::BufferUsages::VERTEX,
+        //     }
+        // );
+        // let index_buffer = device.create_buffer_init(
+        //     // same as vertex buffer
+        //     &wgpu::util::BufferInitDescriptor {
+        //         label: Some("Index Buffer"),
+        //         contents: bytemuck::cast_slice(INDICES),
+        //         usage: wgpu::BufferUsages::INDEX,
+        //     }
+        // );
 
-    pub fn set_ortho(&mut self, size: f32) {
-        self.ortho_size = size;
-        self.update_matrix();
-    }
-}
+        // // store count of all indices to tell GPU how many to draw later
+        // let num_indices = INDICES.len() as u32;
 
-impl Default for Camera {
-    fn default() -> Self {
-        let mut camera = Camera {
-            transform: Transform::default(),
-            fov: 90.0,
-            near: 0.01,
-            far: 100.0,
-            transform_matrix: Matrix4::identity(),
-            projection_matrix: Matrix4::identity(),
-            ortho_size: 50.0,
-            projection: Projection::Perspective,
+        let mut application = Application {
+            window,
+            surface: ManuallyDrop::new(surface),
+            surface_format,
+            adapter,
+            device,
+            queue,
+            config,
+            render_pipeline,
+            diffuse_texture,
+            diffuse_bind_group,
+            camera,
+            camera_controller,
+            camera_buffer,
+            camera_bind_group,
+            camera_uniform,
+            instances,
+            instance_buffer,
+            depth_texture,
+            obj_model,
+            debug: DebugInfo::new(),
         };
-        camera.update_matrix();
-        camera
-    }
-}
 
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Transform {
-    // 3D transformation properties
-    pub position: Position,
-    pub rotation: Rotation,
-    pub scale: Scale,
-}
+        // apply the config to the surface
+        // tells GPU to create a swap chain (set of textures to draw to) with the w/h/format
+        application.configure_surface();
 
-impl Transform {
-    // create a Transform with just position, using default rotation and scale
-    pub fn at_position(position: Position) -> Self {
-        Self {
-            position,
-            rotation: Rotation::default(),
-            scale: Scale::default(),
-        }
+        application
     }
 
-    // create a Transform at specific coordinates with default rotation and scale
-    pub fn at_position_raw(x: f32, y: f32, z: f32) -> Self {
-        Self::at_position(Position { x, y, z })
+    pub fn window(&self) -> &Window {
+        &self.window
     }
 
-    pub fn from_matrix(matrix: &Matrix4<f32>) -> Self {
-        // decomposes a 4x4 matrix into position, rotation, and scale
-        Self {
-            position: Position::from_matrix(matrix),
-            rotation: Rotation::from_matrix(matrix),
-            scale: Scale::from_matrix(matrix),
-        }
-    }
+    fn configure_surface(&mut self) {
+        // applies the settings stored in the config to the surface itself
+        // called at start and on window resize
 
-    pub fn to_matrix(&self) -> Matrix4<f32> {
-        let t = self.position.to_matrix();
-        let r = self.rotation.to_matrix();
-        let s = self.scale.to_matrix();
-        t * r * s
-    }
+        // Swap Chain Process:
+        // modern rendering doesn't draw directly to the image on screen; instead, it uses two or three buffers:
+        // Front buffer - the texture the monitor is currently reading from
+        // Back buffer - a hidden texture where the application is drawing the next frame
+        // Mailbox buffer - an optional third buffer that stores the last fully completed frame
 
-    pub fn identity() -> Self {
-        Self {
-            position: Position {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-            },
-            rotation: Rotation {
-                pitch: 0.0,
-                yaw: 0.0,
-                roll: 0.0,
-            },
-            scale: Scale {
-                x: 1.0,
-                y: 1.0,
-                z: 1.0,
-            },
-        }
-    }
+        // the "swap" in swap chain happens when we want to update the texture the monitor is reading from;
+        // so it swaps the pointer to the buffer the monitor will read instead of doing a frame copy
+        // (the Back buffer becomes the Front buffer, and vice versa)
 
-    // functions to get the raw values easier
-    pub fn position(&self) -> (f32, f32, f32) {
-        (self.position.x, self.position.y, self.position.z)
-}
-    pub fn pos_x(&self) -> f32 { self.position.x }
-    pub fn pos_y(&self) -> f32 { self.position.y }
-    pub fn pos_z(&self) -> f32 { self.position.z }
+        // when using VSync, only the first two buffers are used; this is because it allows the 
+        // swap to happen in sync with the refresh rate (VBlank period) to avoid tearing (half rendered frames)
+        // otherwise, the GPU keeps churning frames out in the Back buffer, and when a frame is complete
+        // it sends it to the Mailbox buffer, and when the monitor refreshes, it reads from the Mailbox buffer
+        // which is guarenteed to be a full frame, preventing tearing (but using more VRAM)
 
-    pub fn rotation(&self) -> (f32, f32, f32) {
-        (self.rotation.pitch, self.rotation.yaw, self.rotation.roll)
-    }
-    pub fn pitch(&self) -> f32 { self.rotation.pitch }
-    pub fn yaw(&self) -> f32 { self.rotation.yaw }
-    pub fn roll(&self) -> f32 { self.rotation.roll }
-
-    pub fn scale(&self) -> (f32, f32, f32) {
-        (self.scale.x, self.scale.y, self.scale.z)
-    }
-    pub fn scale_x(&self) -> f32 { self.scale.x }
-    pub fn scale_y(&self) -> f32 { self.scale.y }
-    pub fn scale_z(&self) -> f32 { self.scale.z }
-}
-
-impl Mul for Transform {
-    type Output = Self;
-
-    fn mul(self, other: Self) -> Self {
-        // combine two transforms by multiplying their matrices
-        let self_matrix = self.to_matrix();
-        let other_matrix = other.to_matrix();
-        Self::from_matrix(&(self_matrix * other_matrix))
-    }
-}
-
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
-pub struct Position {
-    // 3D position coordinates
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-}
-
-impl Position {
-    pub fn from_matrix(matrix: &Matrix4<f32>) -> Self {
-        // translation/position vector is the first 3 components of the 4th column
-        let pos_vec = matrix.column(3).xyz();
-        Self { x: pos_vec.x, y: pos_vec.y, z: pos_vec.z }
-    }
-
-    pub fn to_matrix(&self) -> Matrix4<f32> {
-        // position/translation matrix
-        Matrix4::new_translation(&Vector3::new(self.x, self.y, self.z))
-    }
-}
-
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
-pub struct Rotation {
-    pub pitch: f32, // up/down rotation
-    pub yaw: f32,   // left/right rotation
-    pub roll: f32,  // tilt rotation
-}
-
-impl Rotation {
-    pub fn from_matrix(matrix: &Matrix4<f32>) -> Self {
-        // extract the scale to normalize the rotation
-        let sx = matrix.column(0).magnitude();
-        let sy = matrix.column(1).magnitude();
-        let sz = matrix.column(2).magnitude();
-
-        // check to avoid division by zero
-        if sx == 0.0 || sy == 0.0 || sz == 0.0 {
-            return Self { pitch: 0.0, yaw: 0.0, roll: 0.0 };
-        }
-
-        // create a pure rotation matrix by removing the scale
-        let rotation_matrix = nalgebra::Matrix3::from_columns(&[
-            matrix.column(0).xyz() / sx,
-            matrix.column(1).xyz() / sy,
-            matrix.column(2).xyz() / sz,
-        ]);
-
-        let rotation = Rotation3::from_matrix_unchecked(rotation_matrix);
-
-        // convert the pure rotation matrix to a quaternion
-        let rotation_quat = UnitQuaternion::from_rotation_matrix(&rotation);
-
-        // convert the quaternion to Euler angles (roll, pitch, yaw)
-        let (roll, pitch, yaw) = rotation_quat.euler_angles();
-
-        Self {
-            pitch: pitch.to_degrees(),
-            yaw: yaw.to_degrees(),
-            roll: roll.to_degrees(),
-        }
-    }
-
-    pub fn to_matrix(&self) -> Matrix4<f32> {
-        // convert degrees to radians for nalgebra functions
-        let pitch_rad = self.pitch.to_radians();
-        let yaw_rad = self.yaw.to_radians();
-        let roll_rad = self.roll.to_radians();
-
-        // create a quaternion from Euler angles
-        let quaternion = UnitQuaternion::from_euler_angles(roll_rad, pitch_rad, yaw_rad);
-
-        // convert the quaternion to a 4x4 matrix
-        quaternion.to_homogeneous()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Scale {
-    // 3D scale factors in each direction
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-}
-
-impl Scale {
-    pub fn from_matrix(matrix: &Matrix4<f32>) -> Self {
-        // scale is the magnitude (length) of each of the first three column vectors
-        let sx = matrix.column(0).magnitude();
-        let sy = matrix.column(1).magnitude();
-        let sz = matrix.column(2).magnitude();
-        Self { x: sx, y: sy, z: sz }
-    }
-    
-    pub fn to_matrix(&self) -> Matrix4<f32> {
-        Matrix4::new_nonuniform_scaling(&Vector3::new(self.x, self.y, self.z))
-    }
-}
-
-impl Default for Scale {
-    fn default() -> Self {
-        Self { x: 1.0, y: 1.0, z: 1.0 }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum ObjectKind {
-    // what kind of data a Node is associated with
-    Mesh(MeshId),
-    RectangularPrism(PrismId),
-}
-
-#[derive(Debug)]
-pub struct Node {
-    pub name: String,
-    pub transform: Transform,
-    // hierarchical structure
-    pub parent: Option<NodeId>,
-    pub children: Vec<NodeId>,
-    // link to the actual geometry
-    pub kind: Option<ObjectKind>,
-}
-
-#[derive(Clone, Default)]
-pub struct MeshComponent {
-    pub vertices: Vec<Point3D>,
-    pub faces: Vec<Face>,
-    pub material_id: Option<MaterialId>,
-}
-
-impl MeshComponent {
-    pub fn get_local_tris(&self) -> Vec<Triangle> {
-        // converts the indexed faces of the mesh into
-        // a flat list of triangles in local space
-        let mut tris = Vec::new();
-
-        // iterate over each face defined in the mesh component
-        for face in &self.faces {
-            // a face must have at least 3 vertices to form a triangle
-            if face.vertex_indices.len() < 3 {
-                continue;
-            }
-
-            // use a "fan" triangulation method for polygons (faces with >3 vertices)
-            // we anchor the fan on the first vertex of the face
-            let v0_index = face.vertex_indices[0] as usize;
-            let v0 = self.vertices[v0_index];
-
-            // create tris by connecting the anchor to
-            // every subsequent pair of vertices
-            // for a quad (v0, v1, v2, v3) this creates tris (v0, v1, v2) and (v0, v2, v3)
-            for i in 1..(face.vertex_indices.len() - 1) {
-                let v1_index = face.vertex_indices[i] as usize;
-                let v2_index = face.vertex_indices[i + 1] as usize;
-
-                let v1 = self.vertices[v1_index];
-                let v2 = self.vertices[v2_index];
-
-                tris.push([v0, v1, v2]);
-            }
-        }
-        tris
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct RectangularPrismComponent {
-    pub size: (f32, f32, f32), // width, height, depth
-    pub tri_colors: [[Color; 3]; 12],
-}
-
-impl Default for RectangularPrismComponent {
-    fn default() -> Self {
-        let mut colors = [[(0, 0, 0, 255); 3]; 12];
-        for tri in colors.iter_mut() {
-            for color in tri.iter_mut() {
-                *color = random_color();
-            }
-        }
-        Self {
-            size: (0.0, 0.0, 0.0),
-            tri_colors: colors,
-        }
-    }
-}
-
-impl RectangularPrismComponent {
-    fn vertices(&self) -> [Point3D; 8] {
-        // returns the 8 corner vertices of the rectangular prism in local space
-        let (w, h, d) = self.size;
-        [
-            (-w / 2.0, -h / 2.0, -d / 2.0), // back  bottom left
-            ( w / 2.0, -h / 2.0, -d / 2.0), // back  bottom right
-            (-w / 2.0,  h / 2.0, -d / 2.0), // back  top    left
-            ( w / 2.0,  h / 2.0, -d / 2.0), // back  top    right
-            (-w / 2.0, -h / 2.0,  d / 2.0), // front bottom left
-            ( w / 2.0, -h / 2.0,  d / 2.0), // front bottom right
-            (-w / 2.0,  h / 2.0,  d / 2.0), // front top    left
-            ( w / 2.0,  h / 2.0,  d / 2.0), // front top    right
-        ]
-    }
-
-    pub fn tris(&self) -> Vec<Triangle> {
-        let vertices = self.vertices();
-        vec![
-            // back face (normal -Z)
-            [ vertices[0], vertices[2], vertices[1] ],
-            [ vertices[1], vertices[2], vertices[3] ],
-            // front face (normal +Z)
-            [ vertices[4], vertices[5], vertices[6] ],
-            [ vertices[5], vertices[7], vertices[6] ],
-            // left face (normal -X)
-            [ vertices[0], vertices[4], vertices[2] ],
-            [ vertices[4], vertices[6], vertices[2] ],
-            // right face (normal +X)
-            [ vertices[1], vertices[3], vertices[5] ],
-            [ vertices[5], vertices[3], vertices[7] ],
-            // top face (normal +Y)
-            [ vertices[2], vertices[6], vertices[3] ],
-            [ vertices[3], vertices[6], vertices[7] ],
-            // bottom face (normal -Y)
-            [ vertices[0], vertices[1], vertices[4] ],
-            [ vertices[1], vertices[5], vertices[4] ],
-        ]
-    }
-}
-
-pub fn compute_region_code(x: f32, y: f32, x_min: f32, x_max: f32, y_min: f32, y_max: f32) -> u32 {
-    // initialized as being inside
-    let mut code = INSIDE;
-    if x < x_min {
-        code |= LEFT; // to the left
-    }
-    if x > x_max {
-        code |= RIGHT; // to the right
-    }
-    if y < y_min {
-        code |= BOTTOM; // below
-    }
-    if y > y_max {
-        code |= TOP; // above
-    }
-
-    code
-}
-
-pub fn clip_line(p1: (f32, f32), p2: (f32, f32), bounds: (f32, f32, f32, f32)) -> Option<(f32, f32, f32, f32)> {
-    // Cohen–Sutherland line clipping algorithm
-    // https://www.geeksforgeeks.org/dsa/line-clipping-set-1-cohen-sutherland-algorithm/
-
-    let (x_min, x_max, y_min, y_max) = bounds;
-    let (mut x1, mut y1) = p1;
-    let (mut x2, mut y2) = p2;
-    // compute region codes for p1, p2
-    let mut code1 = compute_region_code(x1, y1, x_min, x_max, y_min, y_max);
-    let mut code2 = compute_region_code(x2, y2, x_min, x_max, y_min, y_max);
-
-    // initialize line as outside the window
-    let mut accept = false;
-
-    loop {
-        if code1 | code2 == 0b0000 {
-            // both endpoints lie within window
-            accept = true;
-            break;
-        }
-        else if code1 & code2 != 0b0000 {
-            // both endpoints are outside window in same region
-            break;
-        }
-        else {
-            // some segment of line lies within the window
-            let (mut x, mut y) = (0.0, 0.0);
-
-            // at least one endpoint is outside the window, pick it
-            let code_out = if code1 != 0b0000 {
-                code1
-            } else {
-                code2
-            };
-
-            // find intersection point;
-            // using formulas y = y1 + slope * (x - x1),
-            // x = x1 + (1 / slope) * (y - y1)
-            if code_out & TOP != 0b0000 {
-                // point is above the window
-                x = x1 + (x2 - x1) * (y_max - y1) / (y2 - y1);
-                y = y_max;
-            }
-            else if code_out & BOTTOM != 0b0000 {
-                // point is below the window
-                x = x1 + (x2 - x1) * (y_min - y1) / (y2 - y1);
-                y = y_min;
-            }
-            else if code_out & RIGHT != 0b0000 {
-                // point is to the right of window
-                y = y1 + (y2 - y1) * (x_max - x1) / (x2 - x1);
-                x = x_max;
-            }
-            else if code_out & LEFT != 0b0000 {
-                // point is to the left of window
-                y = y1 + (y2 - y1) * (x_min - x1) / (x2 - x1);
-                x = x_min;
-            }
-
-            // now intersection point x, y is found
-            // replace point outside window by intersection point
-            if code_out == code1 {
-                x1 = x;
-                y1 = y;
-                code1 = compute_region_code(x1, y1, x_min, x_max, y_min, y_max);
-            } else {
-                x2 = x;
-                y2 = y;
-                code2 = compute_region_code(x2, y2, x_min, x_max, y_min, y_max);
-            }
-        }
-    }
-    if accept {
-        Some((x1, y1, x2, y2)) // return the clipped line segment
-    } else {
-        None // line is completely outside the window
-    }
-}
-
-pub fn clip_line_to_camera_plane(v1: (f32, f32, f32), v2: (f32, f32, f32), camera: &Camera) -> Option<Line3D> {
-    // clip a 3D line against the camera's near plane (z = -near_plane in camera space)
-    // transform vertices to camera space
-    let transform_vertex = |vertex: (f32, f32, f32)| -> (f32, f32, f32) {
-        let (mut x, mut y, mut z) = vertex;
-
-        // apply camera translation
-        x -= camera.transform.position.x;
-        y -= camera.transform.position.y;
-        z -= camera.transform.position.z;
-
-        // yaw (y axis)
-        let (sin_yaw, cos_yaw) = camera.transform.rotation.yaw.to_radians().sin_cos();
-        let x1 = cos_yaw * x + sin_yaw * z;
-        let z1 = -sin_yaw * x + cos_yaw * z;
-
-        // pitch (x axis)
-        let (sin_pitch, cos_pitch) = camera.transform.rotation.pitch.to_radians().sin_cos();
-        let y2 = cos_pitch * y - sin_pitch * z1;
-        let z2 = sin_pitch * y + cos_pitch * z1;
-
-        // roll (z axis)
-        let (sin_roll, cos_roll) = camera.transform.rotation.roll.to_radians().sin_cos();
-        let x3 = cos_roll * x1 - sin_roll * y2;
-        let y3 = sin_roll * x1 + cos_roll * y2;
-
-        (x3, y3, z2)
-    };
-
-    let cam_v1 = transform_vertex(v1);
-    let cam_v2 = transform_vertex(v2);
-
-    let near_plane = -0.01; // very close to camera
-
-    // check if both points are behind camera
-    if cam_v1.2 >= near_plane && cam_v2.2 >= near_plane {
-        return None; // both behind camera
-    }
-
-    // check if both points are in front of camera
-    if cam_v1.2 < near_plane && cam_v2.2 < near_plane {
-        return Some((v1, v2)); // both in front, no clipping needed
-    }
-
-    // one point is behind, one is in front - need to clip
-    let (front_point, behind_point, front_cam, behind_cam) = if cam_v1.2 < near_plane {
-        (v1, v2, cam_v1, cam_v2)
-    } else {
-        (v2, v1, cam_v2, cam_v1)
-    };
-
-    // calculate intersection with near plane
-    let t = (near_plane - front_cam.2) / (behind_cam.2 - front_cam.2);
-
-    // interpolate to find intersection point in world space
-    let intersect = (
-        front_point.0 + t * (behind_point.0 - front_point.0),
-        front_point.1 + t * (behind_point.1 - front_point.1),
-        front_point.2 + t * (behind_point.2 - front_point.2),
-    );
-
-    Some((front_point, intersect))
-}
-
-
-pub fn draw_line(buffer: &mut Buffer, p1: (f32, f32), p2: (f32, f32), color: Color) {
-    let bounds = (0.0, buffer.width as f32, 0.0, buffer.height as f32);
-    let line = clip_line(p1, p2, bounds);
-    let (x0, y0, x1, y1) = match line {
-        Some(l) => l,
-        None => {
-            // line is completely outside the window, do not draw
+        let (width, height) = self.window.get_size();
+        // only configure the surface if the dimensions are valid
+        if width == 0 || height == 0 {
             return;
         }
-    };
-
-    let algorithm = 1; // 1 = Bresenham, 2 = DDA
-    match algorithm {
-        1 => {
-            let (mut x0, mut y0, x1, y1) = (
-                x0 as i32, y0 as i32, x1 as i32, y1 as i32
-            );
-
-            let dx = (x1 - x0).abs();
-            let dy = -(y1 - y0).abs();
-            let sx = if x0 < x1 { 1 } else { -1 };
-            let sy = if y0 < y1 { 1 } else { -1 };
-
-            let mut err = dx + dy;
-
-            let mut i = 0;
-            loop {
-                if i > 10000 {
-                    break; // prevent infinite loop
-                } else {
-                    i += 1;
-                }
-                if x0 >= 0 && y0 >= 0 && (x0 as usize) < buffer.width && (y0 as usize) < buffer.height {
-                    buffer.draw_pixel(x0 as usize, y0 as usize, color, 2.0);
-                }
-                if x0 == x1 && y0 == y1 {
-                    break;
-                }
-
-                let err2 = err * 2;
-                if err2 >= dy {
-                    err += dy;
-                    x0 += sx;
-                }
-                if err2 <= dx {
-                    err += dx;
-                    y0 += sy;
-                }
-            }
-        }
-        2 => {
-            let dx = x1 - x0;
-            let dy = y1 - y0;
-
-            let steps = dx.abs().max(dy.abs()) as usize;
-            if steps == 0 { return; }
-
-            let x_inc = dx / (steps as f32);
-            let y_inc = dy / (steps as f32);
-            let (mut x, mut y) = (x0, y0);
-
-            for _ in 0..steps {
-                x += x_inc;
-                y += y_inc;
-                if x >= 0.0 && y >= 0.0 && (x as usize) < buffer.width && (y as usize) < buffer.height {
-                    buffer.draw_pixel(x as usize, y as usize, color, 2.0);
-                }
-            }
-        }
-
-        _ => {}
-    }
-}
-
-pub fn project_to_screen_space(vertex: &(f32, f32, f32), camera: &Camera, buffer: &Buffer) -> Option<(f32, f32)> {
-    let mut point = Vector4::new(vertex.0, vertex.1, vertex.2, 1.0);
-    point = project_world_to_view(&point, camera);
-    point = project_view_to_clip(&point, buffer, camera);
-    point = project_clip_to_ndc(&point);
-    point = project_ndc_to_screen(&point, buffer);
-    Some((point.x, point.y))
-}
-
-// ================================ MATRIX RENDERING ================================
-
-pub fn render_tri(
-    buffer: &mut Buffer,
-    camera: &Camera,
-    tri: &Triangle,
-    colors: [Color; 3],
-    view_projection: &Matrix4<f32>
-) {
-    // convert triangle vertices to homogeneous coordinates (x, y, z, w)
-    // this allows for easier matrix transformations
-    let tri_hom: [Vector4<f32>; 3] = [
-        Vector4::new(tri[0].0, tri[0].1, tri[0].2, 1.0),
-        Vector4::new(tri[1].0, tri[1].1, tri[1].2, 1.0),
-        Vector4::new(tri[2].0, tri[2].1, tri[2].2, 1.0),
-    ];
-
-    // world space -> view space
-    let tri_view: [Vector4<f32>; 3] = [
-        project_world_to_view(&tri_hom[0], camera),
-        project_world_to_view(&tri_hom[1], camera),
-        project_world_to_view(&tri_hom[2], camera),
-    ];
-
-    // backface culling
-    if is_backface(&tri_view, camera) {
-        return; // skip rendering
+        // set the new window sizes
+        self.config.width = width as u32;
+        self.config.height = height as u32;
+        self.camera.aspect = self.config.width as f32 / self.config.height as f32;
+        // reconfigure the surface
+        self.surface.configure(&self.device, &self.config);
+        // recreate depth texture with new size
+        self.depth_texture = texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
     }
 
-    let clip_result = clip_triangle_against_near_plane(&tri_view, camera);
-    if clip_result.is_empty() {
-        return; // skip rendering if triangle is fully outside near plane
+    fn update(&mut self) {
+        self.camera_controller.update_camera(&mut self.camera);
+        self.camera_uniform.update_view_proj(&self.camera);
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
     }
-    for clipped in clip_result {
-        // view space -> clip space using precomputed matrix
-        let tri_clip: [Vector4<f32>; 3] = [
-            view_projection * clipped[0],
-            view_projection * clipped[1],
-            view_projection * clipped[2],
-        ];
 
-        if is_fully_outside_clip_space(tri_clip) {
-            continue; // skip rendering if triangle is fully outside clip space
-        }
+    pub fn draw_frame(&mut self) {
+        // draws the current frame
 
-        let clip_w = (tri_clip[0].w, tri_clip[1].w, tri_clip[2].w);
+        // reset per-frame debug counters
+        self.debug.draw_calls = 0;
+        self.debug.rendered_tris = 0;
 
-        // clip space -> NDC (Normalized Device Coordinates)
-        let tri_ndc: [Vector4<f32>; 3] = [
-            project_clip_to_ndc(&tri_clip[0]),
-            project_clip_to_ndc(&tri_clip[1]),
-            project_clip_to_ndc(&tri_clip[2]),
-        ];
-
-        // check if triangle is fully outside NDC space
-        if is_fully_outside_ndc(&tri_ndc) {
-            continue;
-        }
-
-        // check for invalid projections
-        if tri_ndc.iter().any(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite()) {
-            continue;
-        }
-
-        // NDC -> screen space (pixel coordinates)
-        let tri_screen: [Vector4<f32>; 3] = [
-            project_ndc_to_screen(&tri_ndc[0], buffer),
-            project_ndc_to_screen(&tri_ndc[1], buffer),
-            project_ndc_to_screen(&tri_ndc[2], buffer),
-        ];
-
-        let edge_function = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| -> f32 {
-            // determines which side of line ab point c is on (sign)
-            // and the barycentric area (magnitude)
-            (c.0 - a.0) * (b.1 - a.1) - (c.1 - a.1) * (b.0 - a.0)
+        let frame = match self.surface.get_current_texture() {
+            // request a buffer/texture/frame from the swap chain
+            Ok(surface_texture) => surface_texture,
+            Err(err) => match err {
+                wgpu::SurfaceError::Timeout => {
+                    // took too long to get a new frame; try again next frame
+                    log::warn!("Surface texture acquisition timed out.");
+                    return;
+                }
+                wgpu::SurfaceError::Outdated => {
+                    // window resized or something else made the swap chain obsolete
+                    self.configure_surface();
+                    return;
+                }
+                wgpu::SurfaceError::Lost => {
+                    // swap chain was lost for a serious reason (like display driver reset)
+                    log::error!("Swapchain has been lost.");
+                    self.configure_surface();
+                    return;
+                }
+                wgpu::SurfaceError::OutOfMemory => panic!("Out of memory on surface acquisition"),
+                wgpu::SurfaceError::Other => panic!("Other surface error, check log for details"),
+            },
         };
 
-        let (a, b, c) = (tri_screen[0], tri_screen[1], tri_screen[2]);
-        let area = edge_function((a.x, a.y), (b.x, b.y), (c.x, c.y));
-        if area.abs() < EPSILON {
-            continue; // degenerate triangle
-        }
-        let area_inv = 1.0 / area;
+        // we draw to a TextureView instead of directly to the texture
+        // a TextureView is like a lens or interpretation of a texture, it describes
+        // how we want to look at and use the texture (eg. mipmap levels or array layers to use)
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // triangle bounding box to limit pixel checks
-        let bounding_box = compute_clamped_bbox(&tri_screen, buffer.width as f32, buffer.height as f32);
+        // create the CommandEncoder, which records a list of all commands to be sent to the GPU
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Main encoder"),
+            });
 
-        for y in bounding_box.1..bounding_box.3 {
-            for x in bounding_box.0..bounding_box.2 {
-                // check if point p is inside the triangle using edge function
-                let p = (x as f32 + 0.5, y as f32 + 0.5);
-                let mut w0 = edge_function((b.x, b.y), (c.x, c.y), p);
-                let mut w1 = edge_function((c.x, c.y), (a.x, a.y), p);
-                let mut w2 = edge_function((a.x, a.y), (b.x, b.y), p);
-                if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) || (w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0) {
-                    // point is inside the triangle
-                    w0 *= area_inv;
-                    w1 *= area_inv;
-                    w2 *= area_inv;
-                    let bary = (w0, w1, w2);
-
-                    // use w-buffering instead of z-buffering for better perspective accuracy
-                    // linearly interpolate 1/w, then invert to get w for depth testing
-                    let inv_w_interp = interp_linear_scalar(
-                        (1.0 / clip_w.0, 1.0 / clip_w.1, 1.0 / clip_w.2), 
-                        bary,
-                    );
-                    // use the reciprocal as depth - smaller values = closer
-                    let depth = 1.0 / inv_w_interp;
-                    // color gradient (perspective-correct interpolation)
-                    let pixel_color = interp_perspective_color(colors, clip_w, bary);
-
-                    buffer.draw_pixel(x, y, pixel_color, depth);
-                }
-            }
-        }
-    }
-}
-
-pub fn project_world_to_view(point: &Vector4<f32>, camera: &Camera) -> Vector4<f32> {
-    // projects a 3D point in world space into view/camera space (camera = origin, facing -z)
-    camera.transform_matrix * point
-}
-
-pub fn project_view_to_clip(point: &Vector4<f32>, buffer: &Buffer, camera: &Camera) -> Vector4<f32> {
-    // projects a 3D point in view space (camera = origin, facing -z)
-    // into 3D clip space (x, y, z) where z is the depth
-
-    let view_projection = create_view_projection_matrix(buffer, camera);
-    view_projection * point
-}
-
-pub fn project_clip_to_ndc(point: &Vector4<f32>) -> Vector4<f32> {
-    // projects a 3D point in clip space (x, y, z) into normalized device coordinates (NDC)
-    // where x and y are in [-1.0, 1.0] range
-    if point.w.abs() < EPSILON {
-        // avoid division by zero
-        return Vector4::new(f32::NAN, f32::NAN, f32::NAN, f32::NAN);
-    }
-    let x_ndc = point.x / point.w;
-    let y_ndc = point.y / point.w;
-    let z_ndc = point.z / point.w;
-
-    Vector4::new(x_ndc, y_ndc, z_ndc, 1.0)
-}
-
-pub fn project_ndc_to_screen(point: &Vector4<f32>, buffer: &Buffer) -> Vector4<f32> {
-    // projects a 3D point in normalized device coordinates (NDC)
-    // into screen space (pixel coordinates)
-    buffer.matrix * point
-}
-
-pub fn create_view_projection_matrix(buffer: &Buffer, camera: &Camera) -> Matrix4<f32> {
-    let aspect_ratio = buffer.width as f32 / buffer.height as f32;
-    let aspect_scale_matrix: Matrix4<f32> = Matrix4::new(
-        1.0 / aspect_ratio, 0.0, 0.0, 0.0,
-        0.0, 1.0,      0.0, 0.0,
-        0.0, 0.0,      1.0, 0.0,
-        0.0, 0.0,      0.0, 1.0,
-    );
-    aspect_scale_matrix * camera.projection_matrix
-}
-
-pub fn is_backface(tri: &[Vector4<f32>; 3], camera: &Camera) -> bool {
-    // checks if a triangle is a backface (normal facing away from the camera)
-    let edge1 = tri[1].xyz() - tri[0].xyz();
-    let edge2 = tri[2].xyz() - tri[0].xyz();
-    let normal = edge1.cross(&edge2); // unnormalized face normal
-
-    if camera.projection == Projection::Orthographic {
-        // orthographic view: camera direction is always -Z
-        let view_direction = nalgebra::Vector3::new(0.0, 0.0, -1.0);
-        normal.dot(&view_direction) >= 0.0
-    } else {
-        // perspective view: use view direction from camera to triangle centroid
-        let centroid = (tri[0].xyz() + tri[1].xyz() + tri[2].xyz()) / 3.0;
-        let view_direction = -centroid;
-        normal.dot(&view_direction) <= 0.0 // normal points away from camera → backface
-    }
-}
-
-pub fn clip_triangle_against_near_plane(tri: &[Vector4<f32>; 3], camera: &Camera) -> Vec<[Vector4<f32>; 3]> {
-    // triangle is [A, B, C], each with view-space position (x,y,z)
-    let near = if camera.projection == Projection::Perspective {
-        camera.near()
-    } else {
-        -100000.0 // large value for orthographic projection
-    };
-    // keeps points in front of camera
-    let inside_test = |p: Vector4<f32>| p.z <= -near;
-    let mut result_vertices = Vec::new();
-
-    for (p, q) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-        let p_in = inside_test(p);
-        let q_in = inside_test(q);
-
-        if p_in {
-            result_vertices.push(p);
-        }
-
-        if p_in ^ q_in {
-            // edge crosses plane, compute intersection
-            let t = (-near - p.z) / (q.z - p.z);
-            // interpolate all components (including any attributes)
-            let i = p + t * (q - p);
-            result_vertices.push(i);
-        }
-    }
-
-    // result_vertices is 0..4 points; re-triangulate:
-    if result_vertices.len() < 3 {
-        // fully outside
-        vec![]
-    } else if result_vertices.len() == 3 {
-        vec![[
-            result_vertices[0],
-            result_vertices[1],
-            result_vertices[2],
-        ]]// single triangle
-    } else if result_vertices.len() == 4 {
-        // two triangles
-        vec![
-            [
-                result_vertices[0],
-                result_vertices[1],
-                result_vertices[2],
+        // begins a render pass, a block of drawing operations that target the same set of framebuffers/attachments
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            // specifies where the final colors will be written
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    // attach the view of the frame texture
+                    view: &view,
+                    resolve_target: None,
+                    // tells the GPU what to do with the attachment 
+                    // at the beginning (load) and end (store) of the pass
+                    ops: wgpu::Operations {
+                        // at the start, clear the texture to a background color
+                        load: wgpu::LoadOp::Clear(
+                            wgpu::Color {
+                                r: 0.1,
+                                g: 0.2,
+                                b: 0.3,
+                                a: 1.0,
+                            }
+                        ),
+                        // at the end, store the results into the texture
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })
             ],
-            [
-                result_vertices[0],
-                result_vertices[2],
-                result_vertices[3],
+            // attach depth texture to render objects in the right order
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        // sets the render pipeline and buffers, and draw our frame
+        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+
+        render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera_bind_group);
+
+        self.debug.draw_calls += 1;
+        // self.debug.rendered_tris += (self.num_indices / 3) * self.instances.len() as u32;
+
+        drop(render_pass); // manual drop
+
+        // tell the encoder we are done recording and to package all commands into a command buffer
+        let command_buffer = encoder.finish();
+        // submit the command buffer with all commands to the Queue
+        self.queue.submit(Some(command_buffer));
+        // tell the swap chain we're done drawing this frame, ready to be presented to the screen
+        frame.present()
+    }
+}
+
+#[rustfmt::skip]
+// wgpu's normalized device coordinates have the y-axis/x-axis range -1.0 to +1.0
+// and z-axis range 0.0 to +1.0; cgmath uses OpenGL's coordinate system, so
+// this matrix scales/translates to account for that
+pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 0.5, 0.5,
+    0.0, 0.0, 0.0, 1.0,
+);
+ 
+struct Camera {
+    // position of the camera in 3D world space
+    eye: cgmath::Point3<f32>,
+    // the point in space the camera is looking at
+    // the direction the camera is facing = the vector from eye to target
+    target: cgmath::Point3<f32>,
+    // defines the "up" direction for the camera so it doesn't roll on its side
+    up: cgmath::Vector3<f32>,
+    // aspect ratio of the screen (w/h) to prevent stretched/squished image
+    aspect: f32,
+    // vertical field of view in degrees; basically zoom
+    fovy: f32,
+    // near/far clipping planes; any geometry outside this range will not be drawn
+    znear: f32,
+    zfar: f32,
+}
+ 
+impl Camera {
+    fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+        // world space -> view space
+        // moves and rotates the whole world so the camera is at (0,0,0) looking down -Z axis
+        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
+        // view space -> ndc space (normalized device coordinates)
+        // squashes the viewing frustrum (a pyramid-ish) into a perfect cube (the ndc)
+        // warps the scene to account for depth (like far objects look closer to the middle)
+        let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
+        OPENGL_TO_WGPU_MATRIX * proj * view
+    }
+}
+ 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    // convert cgmath Matrix4 -> 4x4 f32 array
+    view_proj: [[f32; 4]; 4],
+}
+ 
+impl CameraUniform {
+    fn new() -> Self {
+        use cgmath::SquareMatrix;
+        Self {
+            view_proj: cgmath::Matrix4::identity().into(),
+        }
+    }
+ 
+    fn update_view_proj(&mut self, camera: &Camera) {
+        self.view_proj = camera.build_view_projection_matrix().into();
+    }
+}
+ 
+struct CameraController {
+    speed: f32,
+    is_up_pressed: bool,
+    is_down_pressed: bool,
+    is_forward_pressed: bool,
+    is_backward_pressed: bool,
+    is_left_pressed: bool,
+    is_right_pressed: bool,
+}
+ 
+impl CameraController {
+    fn new(speed: f32) -> Self {
+        Self {
+            speed,
+            is_up_pressed: false,
+            is_down_pressed: false,
+            is_forward_pressed: false,
+            is_backward_pressed: false,
+            is_left_pressed: false,
+            is_right_pressed: false,
+        }
+    }
+ 
+    fn handle_keys(&mut self, keys: &[Key]) {
+        // handles key inputs
+        self.is_up_pressed = keys.contains(&Key::Space);
+        self.is_down_pressed = keys.contains(&Key::LeftShift);
+        self.is_forward_pressed = keys.contains(&Key::W) | keys.contains(&Key::Up);
+        self.is_left_pressed = keys.contains(&Key::A) | keys.contains(&Key::Left);
+        self.is_backward_pressed = keys.contains(&Key::S) | keys.contains(&Key::Down);
+        self.is_right_pressed = keys.contains(&Key::D) | keys.contains(&Key::Right);
+    }
+
+    fn update_camera(&self, camera: &mut Camera) {
+        // move the camera's eye based on inputs
+        let forward = (camera.target - camera.eye).normalize();
+        let right = forward.cross(camera.up);
+
+        if self.is_forward_pressed {
+            camera.eye += forward * self.speed;
+        }
+        if self.is_backward_pressed {
+            camera.eye -= forward * self.speed;
+        }
+
+        if self.is_right_pressed {
+            camera.eye += right * self.speed;
+        }
+        if self.is_left_pressed {
+            camera.eye -= right * self.speed;
+        }
+    }
+}
+
+struct Instance {
+    position: cgmath::Vector3<f32>,
+    // quaternion is used to represent rotation
+    rotation: cgmath::Quaternion<f32>,
+}
+ 
+impl Instance {
+    fn to_raw(&self) -> InstanceRaw {
+        InstanceRaw {
+            model: (cgmath::Matrix4::from_translation(self.position)
+                * cgmath::Matrix4::from(self.rotation))
+            .into(),    
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    model: [[f32; 4]; 4],
+}
+ 
+impl InstanceRaw {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            // we use a step mode of Instance, where our shaders will only change 
+            // to use the next instance when the shader starts processing a new instance
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                // a mat4 takes up 4 vertex slots as it is technically 4 vec4s
+                // we need to define a slot for each vec4 and reassemble in the shader
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    // while our vertex shader only uses locations 0, and 1 now, in later tutorials we'll
+                    // be using 2, 3, and 4, for Vertex; we'll start at slot 5 not conflict with them later
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
             ],
-        ]
-    } else {
-        // more than 4 points, which shouldn't happen in a triangle
-        vec![]
-    }
-}
-
-
-pub fn is_fully_outside_clip_space(tri: [Vector4<f32>; 3]) -> bool {
-    const FRUSTUM_PLANES_CLIP: [(usize, isize); 6] = [
-        // axis (x, y, z), side
-        (0, -1), // x' < -w'
-        (0, 1), // x' >  w'
-        (1, -1), // y' < -w'
-        (1, 1), // y' >  w'
-        (2, -1), // z' < -w'
-        (2, 1), // z' >  w'
-    ];
-    for (axis, side) in FRUSTUM_PLANES_CLIP {
-        let mut all_out = true;
-        for vertex in &tri {
-            let value = vertex[axis];
-            let w = vertex.w;
-            if (side == -1 && value >= -w) || (side == 1 && value <= w) {
-                all_out = false;
-            }
-        }
-        if all_out {
-            // entirely outside this one plane -> reject
-            return true;
         }
     }
-    // potentially partially inside
-    false
 }
+ 
+pub fn run() {
+    env_logger::init();
 
-pub fn is_fully_outside_ndc(tri: &[Vector4<f32>; 3]) -> bool {
-    // ndc space frustum culling
-    if tri[0].x < -1.0 && tri[1].x < -1.0 && tri[2].x < -1.0 {
-        return true; // all x_ndc < -1
-    }
-    if tri[0].x > 1.0 && tri[1].x > 1.0 && tri[2].x > 1.0 {
-        return true; // all x_ndc > 1
-    }
-    if tri[0].y < -1.0 && tri[1].y < -1.0 && tri[2].y < -1.0 {
-        return true; // all y_ndc < -1
-    }
-    if tri[0].y > 1.0 && tri[1].y > 1.0 && tri[2].y > 1.0 {
-        return true; // all y_ndc > 1
-    }
-    if tri[0].z < -1.0 && tri[1].z < -1.0 && tri[2].z < -1.0 {
-        return true; // all z_ndc < -1
-    }
-    if tri[0].z > 1.0 && tri[1].z > 1.0 && tri[2].z > 1.0 {
-        return true; // all z_ndc > 1
-    }
+    // init the application; since Application::new() is async, 
+    // because requesting adaptor/device from OS takes time)
+    // pollster lets us call it in our sync fn and wait here until it's done 
+    let mut application = pollster::block_on(Application::new());
 
-    false
-}
+    // main program loop
+    loop {
+        // processes events like key presses, mouse movements, close button, etc.
+        application.window.update();
 
-fn compute_clamped_bbox(tri: &[Vector4<f32>; 3], screen_width: f32, screen_height: f32) -> (usize, usize, usize, usize) {
-    let mut xmin = (tri[0].x.min(tri[1].x).min(tri[2].x)).floor();
-    let mut xmax = (tri[0].x.max(tri[1].x).max(tri[2].x)).ceil();
-    let mut ymin = (tri[0].y.min(tri[1].y).min(tri[2].y)).floor();
-    let mut ymax = (tri[0].y.max(tri[1].y).max(tri[2].y)).ceil();
-    xmin = xmin.max(0.0);
-    ymin = ymin.max(0.0);
-    xmax = xmax.min(screen_width - 1.0);
-    ymax = ymax.min(screen_height - 1.0);
-
-    (xmin as usize, ymin as usize, xmax as usize, ymax as usize)
-}
-
-fn _interp_perspective_scalar(a: (f32, f32, f32), w_clip: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
-    // performs perspective-correct interpolation of a scalar attribute
-    let inv0 = 1.0 / w_clip.0;
-    let inv1 = 1.0 / w_clip.1;
-    let inv2 = 1.0 / w_clip.2;
-
-    let num = b.0 * (a.0 * inv0) + b.1 * (a.1 * inv1) + b.2 * (a.2 * inv2);
-    let den = b.0 * inv0 + b.1 * inv1 + b.2 * inv2;
-    if den.abs() < EPSILON {
-        return 0.0;
-    }
-    num / den
-}
-
-fn interp_linear_scalar(a: (f32, f32, f32), bary: (f32, f32, f32)) -> f32 {
-    // performs linear interpolation of a scalar attribute using barycentric coordinates
-    let (b0, b1, b2) = bary;
-    a.0 * b0 + a.1 * b1 + a.2 * b2
-}
-
-fn interp_perspective_color(colors: [Color; 3], w_clip: (f32, f32, f32), bary: (f32, f32, f32)) -> Color {
-    // performs perspective-correct interpolation of a color
-    use glam::Vec4;
-
-    // use glam for SIMD
-    let c0 = Vec4::new(colors[0].0 as f32, colors[0].1 as f32, colors[0].2 as f32, colors[0].3 as f32);
-    let c1 = Vec4::new(colors[1].0 as f32, colors[1].1 as f32, colors[1].2 as f32, colors[1].3 as f32);
-    let c2 = Vec4::new(colors[2].0 as f32, colors[2].1 as f32, colors[2].2 as f32, colors[2].3 as f32);
-
-    let (b0, b1, b2) = bary;
-    let (w0_clip, w1_clip, w2_clip) = w_clip;
-
-    // calculate perspective-correct vertex attributes (Color / w)
-    let c0_persp = c0 / w0_clip;
-    let c1_persp = c1 / w1_clip;
-    let c2_persp = c2 / w2_clip;
-
-    // interpolate the (Color / w) attributes using barycentric coordinates
-    let num_vec = c0_persp.mul_add(Vec4::splat(b0), c1_persp.mul_add(Vec4::splat(b1), c2_persp * b2));
-
-    // calculate the interpolated 1/w for the fragment
-    let interpolated_inv_w = (1.0 / w0_clip) * b0 + (1.0 / w1_clip) * b1 + (1.0 / w2_clip) * b2;
-
-    if interpolated_inv_w.abs() < EPSILON {
-        return (0, 0, 0, 0);
-    }
-
-    // final perspective-correct color by dividing by interpolated 1/w
-    let final_color_vec = num_vec / interpolated_inv_w;
-    
-    // lamp the result to the valid color range [0, 255] and convert back to u8 tuple
-    let clamped = final_color_vec.clamp(Vec4::ZERO, Vec4::splat(255.0)).round();
-    (clamped.x as u8, clamped.y as u8, clamped.z as u8, clamped.w as u8)
-}
-
-pub fn make_ortho_projection(left: f32, right: f32, bottom: f32, top: f32) -> Matrix4<f32> {
-    // creates an orthographic projection matrix
-    let near = -100000.0; // near plane
-    let far = 100000.0; // far plane
-    Matrix4::new(
-        2.0 / (right - left), 0.0, 0.0, -(right + left) / (right - left),
-        0.0, 2.0 / (top - bottom), 0.0, -(top + bottom) / (top - bottom),
-        0.0, 0.0, 2.0 / (near - far), (far + near) / (near - far),
-        0.0, 0.0, 0.0, 1.0,
-    )
-}
-
-// ================================================================
-
-pub fn hue_shift(r: u8, g: u8, b: u8, hue_deg: f32) -> (u8, u8, u8) {
-    let (h, s, v) = rgb_to_hsv(r, g, b);
-    let new_h = (h + hue_deg) % 360.0;
-    hsv_to_rgb(new_h, s, v)
-}
-
-pub fn random_color() -> Color {
-    let mut rng = rand::rng();
-    let hsv = (
-        rng.random_range(0.0..=360.0),
-        rng.random_range(0.5..=1.0),
-        rng.random_range(0.9..=1.0),
-    );
-    let (r, g, b) = hsv_to_rgb(hsv.0, hsv.1, hsv.2);
-    (r, g, b, 255)
-}
-
-pub fn random_color_seeded(seed: u64) -> Color {
-    use rand::{Rng, SeedableRng};
-    use rand::rngs::StdRng;
-    let mut rng = StdRng::seed_from_u64(seed);
-    (
-        rng.random_range(0..=255),
-        rng.random_range(0..=255),
-        rng.random_range(0..=255),
-        255, // alpha (fully opaque)
-    )
-}
-
-pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    // convert RGB to HSV color space
-    let r = r as f32 / 255.0;
-    let g = g as f32 / 255.0;
-    let b = b as f32 / 255.0;
-
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-
-    let mut h = 0.0;
-    if delta > 0.0 {
-        if max == r {
-            h = (g - b) / delta + if g < b { 6.0 } else { 0.0 };
-        } else if max == g {
-            h = (b - r) / delta + 2.0;
+        let keys = application.window.get_keys();
+        if keys.contains(&Key::Escape) {
+            return; // exit when esc pressed
         } else {
-            h = (r - g) / delta + 4.0;
+            application.camera_controller.handle_keys(&keys);
         }
-        h /= 6.0; // normalize to [0, 1]
+        if !keys.is_empty() {
+            application.update();
+        }
+
+        if !application.window.is_open() {
+            return; // exit if window is closed
+        }
+
+        application.draw_frame();
+        application.debug.update();
+        print!(
+            "\rFPS: {:.2} | Draw Calls: {:<3} | Tris: {:<4} | Total Frames Drawn: {:<6}",
+            application.debug.fps,
+            application.debug.draw_calls,
+            application.debug.rendered_tris,
+            application.debug.total_frames,
+        );
+        let _ = std::io::stdout().flush();
     }
-
-    let s = if max == 0.0 { 0.0 } else { delta / max };
-    let v = max;
-
-    (h * 360.0, s, v) // return hue in degrees
-}
-
-pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
-    // convert HSV to RGB color space
-    let h = h / 360.0; // normalize hue to [0, 1]
-    let c = v * s; // chroma
-    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-
-    let (r, g, b) = if h < 1.0 / 6.0 {
-        (c, x, 0.0)
-    } else if h < 2.0 / 6.0 {
-        (x, c, 0.0)
-    } else if h < 3.0 / 6.0 {
-        (0.0, c, x)
-    } else if h < 4.0 / 6.0 {
-        (0.0, x, c)
-    } else if h < 5.0 / 6.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-
-    (
-        ((r + m) * 255.0).round() as u8,
-        ((g + m) * 255.0).round() as u8,
-        ((b + m) * 255.0).round() as u8,
-    )
 }

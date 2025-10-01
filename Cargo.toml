@@ -13,8 +13,22 @@ raw-window-handle = "0.6"
 rand = "0.9.2"
 nalgebra = "0.34.0"
 slotmap = "1.0.7"
-# wgpu = "26.0.1"
+# gpu stuff
 glam = "0.28.0"
+anyhow = "1.0"
+env_logger = "0.10"
+log = "0.4"
+wgpu = "26.0.1"
+pollster = "0.3"
+bytemuck = { version = "1.16", features = [ "derive" ] }
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+cgmath = "0.18.0"
+tobj = { version = "3.2", default-features = false, features = ["async"]}
+
+[build-dependencies]
+anyhow = "1.0"
+fs_extra = "1.2"
+glob = "0.3"
 
 [profile.release]
 debug = true

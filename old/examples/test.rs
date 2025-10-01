@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 const WIDTH: usize = 400;
 const HEIGHT: usize = 300;
 const MIDDLE: (f32, f32) = (WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0);
-const BENCHMARK: bool = true; // run benchmark (no window) instead
+const BENCHMARK: bool = false; // run benchmark (no window) instead
 
 fn main() {
     if BENCHMARK {
