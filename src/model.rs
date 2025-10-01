@@ -58,11 +58,6 @@ impl Vertex for ModelVertex {
     }
 }
 
-pub struct Model {
-    pub meshes: Vec<Mesh>,
-    pub materials: Vec<Material>,
-}
-
 pub struct Material {
     pub name: String,
     pub diffuse_texture: texture::Texture,
@@ -77,8 +72,18 @@ pub struct Mesh {
     pub material: usize,
 }
 
+pub struct Model {
+    pub meshes: Vec<Mesh>,
+    pub materials: Vec<Material>,
+}
+
 pub trait DrawModel<'a> {
-    fn draw_mesh(&mut self, mesh: &'a Mesh, material: &'a Material, camera_bind_group: &'a wgpu::BindGroup);
+    fn draw_mesh(
+        &mut self,
+        mesh: &'a Mesh,
+        material: &'a Material,
+        camera_bind_group: &'a wgpu::BindGroup
+    );
     fn draw_mesh_instanced(
         &mut self,
         mesh: &'a Mesh,
@@ -86,7 +91,11 @@ pub trait DrawModel<'a> {
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
     );
-    fn draw_model(&mut self, model: &'a Model, camera_bind_group: &'a wgpu::BindGroup);
+    fn draw_model(
+        &mut self,
+        model: &'a Model,
+        camera_bind_group: &'a wgpu::BindGroup
+    );
     fn draw_model_instanced(
         &mut self,
         model: &'a Model,
@@ -100,7 +109,12 @@ impl<'a, 'b> DrawModel<'b> for wgpu::RenderPass<'a>
 where
     'b: 'a,
 {
-    fn draw_mesh(&mut self, mesh: &'b Mesh, material: &'b Material, camera_bind_group: &'b wgpu::BindGroup) {
+    fn draw_mesh(
+        &mut self,
+        mesh: &'b Mesh,
+        material: &'b Material,
+        camera_bind_group: &'b wgpu::BindGroup
+    ) {
         self.draw_mesh_instanced(mesh, material, 0..1, camera_bind_group);
     }
 

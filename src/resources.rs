@@ -3,7 +3,26 @@ use wgpu::util::DeviceExt;
 
 use crate::{model, texture};
 
+#[cfg(target_arch = "wasm32")]
+fn format_url(file_name: &str) -> reqwest::Url {
+    let window = web_sys::window().unwrap();
+    let location = window.location();
+    let mut origin = location.origin().unwrap();
+    if !origin.ends_with("learn-wgpu") {
+        origin = format!("{}/learn-wgpu", origin);
+    }
+    let base = reqwest::Url::parse(&format!("{}/", origin,)).unwrap();
+    base.join(file_name).unwrap()
+}
+
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
+    #[cfg(target_arch = "wasm32")]
+    let txt = {
+        let url = format_url(file_name);
+        reqwest::get(url).await?.text().await?
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
     let txt = {
         let path = std::path::Path::new(env!("OUT_DIR"))
             .join("res")
@@ -15,13 +34,19 @@ pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
 }
 
 pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    let data = {
+        let url = format_url(file_name);
+        reqwest::get(url).await?.bytes().await?.to_vec()
+    };
+    #[cfg(not(target_arch = "wasm32"))]
     let data = {
         let path = std::path::Path::new(env!("OUT_DIR"))
             .join("res")
             .join(file_name);
         std::fs::read(path)?
     };
-
+ 
     Ok(data)
 }
 
@@ -87,7 +112,7 @@ pub async fn load_model(
     let meshes = models
         .into_iter()
         .map(|m| {
-                let vertices = (0..m.mesh.positions.len() / 3)
+            let vertices = (0..m.mesh.positions.len() / 3)
                 .map(|i| {
                     if m.mesh.normals.is_empty(){
                         model::ModelVertex {
@@ -96,17 +121,23 @@ pub async fn load_model(
                                 m.mesh.positions[i * 3 + 1],
                                 m.mesh.positions[i * 3 + 2],
                             ],
-                            tex_coords: [m.mesh.texcoords[i * 2], 1.0 - m.mesh.texcoords[i * 2 + 1]],
+                            tex_coords: [
+                                m.mesh.texcoords[i * 2],
+                                1.0 - m.mesh.texcoords[i * 2 + 1]
+                            ],
                             normal: [0.0, 0.0, 0.0],
                         }
-                    }else{
+                    } else {
                         model::ModelVertex {
                             position: [
                                 m.mesh.positions[i * 3],
                                 m.mesh.positions[i * 3 + 1],
                                 m.mesh.positions[i * 3 + 2],
                             ],
-                            tex_coords: [m.mesh.texcoords[i * 2], 1.0 - m.mesh.texcoords[i * 2 + 1]],
+                            tex_coords: [
+                                m.mesh.texcoords[i * 2],
+                                1.0 - m.mesh.texcoords[i * 2 + 1]
+                            ],
                             normal: [
                                 m.mesh.normals[i * 3],
                                 m.mesh.normals[i * 3 + 1],
@@ -128,6 +159,7 @@ pub async fn load_model(
                 usage: wgpu::BufferUsages::INDEX,
             });
 
+            log::info!("Mesh: {}", m.name);
             model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,

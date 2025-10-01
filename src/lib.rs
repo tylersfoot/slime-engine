@@ -8,17 +8,17 @@ pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
 use cgmath::prelude::*;
 use std::time::Instant;
 
-pub mod window;
-pub mod texture;
-pub mod model;
+mod window;
+mod texture;
+mod model;
 mod resources;
 
 use window::*;
 use texture::*;
-use model::*;
+use model::{DrawModel, Vertex, Model};
 
 // for instancing test
-const NUM_INSTANCES_PER_ROW: u32 = 10;
+const NUM_INSTANCES_PER_ROW: u32 = 100;
 const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
     NUM_INSTANCES_PER_ROW as f32 * 0.5,
     0.0,
@@ -98,10 +98,6 @@ struct Application<'a> {
     // by bundling, the GPU can swap render pipelines insanely fast
     render_pipeline: wgpu::RenderPipeline,
 
-    #[allow(dead_code)]
-    diffuse_texture: texture::Texture,
-    diffuse_bind_group: wgpu::BindGroup,
-
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -132,14 +128,16 @@ impl Drop for Application<'_> {
 
 impl Application<'_> {
     async fn new() -> Self {
-        // init wgpu handle
+        // the instance is a handle to the GPU
+        // BackendBit::PRIMARY -> Vulkan + Metal + DX12 + Browser WebGPU
+        log::warn!("wgpu setup");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY, // selects best available graphics API
             ..Default::default()
         });
 
         // create the physical window
-        let window = Window::new(
+        let mut window = Window::new(
             "awesome window",
             WIDTH,
             HEIGHT,
@@ -151,6 +149,7 @@ impl Application<'_> {
         .unwrap_or_else(|e| {
             panic!("{}", e);
         });
+        window.set_target_fps(0); // uncapped framerate
 
         // mini_fb's window type isn't `Send` which is required for wgpu's `WindowHandle` trait
         // so have to use the unsafe variant to create a surface directly from the window handle
@@ -175,6 +174,7 @@ impl Application<'_> {
         log::info!("Created wgpu adapter: {:?}", adapter.get_info());
 
         // get a logical connection to the gpu
+        log::warn!("device and queue");
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Device"),
@@ -198,13 +198,14 @@ impl Application<'_> {
         }));
 
         // get what the GPU is capable of (formats, vsync modes, etc.)
+        log::warn!("surface");
         let surface_caps = surface.get_capabilities(&adapter);
-
         // try to get sRGB format for consistent colors
         let surface_format = surface_caps.formats.iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
+        // let surface_format = surface_format.remove_srgb_suffix(); // not sure why the tutorial uses this
 
         // different settings for the surface
         let config = wgpu::SurfaceConfiguration {
@@ -214,17 +215,19 @@ impl Application<'_> {
             format: surface_format,
             width: window.get_size().0 as u32,
             height: window.get_size().1 as u32,
-            // controls VSync; should be Fifo (standard VSync)
-            present_mode: surface_caps.present_modes[0],
+            // controls VSync; defaults to Fifo (standard VSync)
+            // present_mode: surface_caps.present_modes[0],
+            // unlocked FPS for benchmarking
+            present_mode: wgpu::PresentMode::Immediate,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
 
-        // grab the bytes from our image file and load them into an image, convert to Vec of RGBA bytes
-        let diffuse_bytes = include_bytes!("../assets/images/happy-tree.png");
-        let diffuse_texture = Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
-
+        // a bind group describes a set of resources and how they can be accessed by the shader
+        // this is separate from the layout because it allows us to swap bind groups
+        // on the fly given they share the same layout
+        // each texture/sampler has to be added to a bind group
         let texture_bind_group_layout = device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -254,30 +257,9 @@ impl Application<'_> {
             }
         );
 
-        // a bind group describes a set of resources and how they can be accessed by the shader
-        // this is separate from the layout because it allows us to swap bind groups
-        // on the fly given they share the same layout
-        // each texture/sampler has to be added to a bind group; we'll just make a new one for each
-        let diffuse_bind_group = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                layout: &texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                    },
-                ],
-                label: Some("diffuse_bind_group"),
-            }
-        );
-
         // camera instancing
         let camera = Camera {
-            eye: (0.0, 5.0, 10.0).into(),
+            eye: (0.0, 5.0, -10.0).into(),
             target: (0.0, 0.0, 0.0).into(),
             up: cgmath::Vector3::unit_y(),
             aspect: config.width as f32 / config.height as f32,
@@ -290,6 +272,7 @@ impl Application<'_> {
         // create camera uniform so we can use our camera data in shaders
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera);
+            
         let camera_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Camera Buffer"),
@@ -330,11 +313,6 @@ impl Application<'_> {
             }
         );
 
-        let obj_model =
-            resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout)
-                .await
-                .unwrap();
-
         const SPACE_BETWEEN: f32 = 3.0;
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
@@ -362,11 +340,17 @@ impl Application<'_> {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        // create our depth texture for correct z rendering
-        let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texture");
+        log::warn!("load model");
+        let obj_model =
+            resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout)
+                .await
+                .unwrap();
 
         // load/check shader at compile time
         let shader = device.create_shader_module(wgpu::include_wgsl!("../assets/shaders/shader.wgsl"));
+
+        // create our depth texture for correct z rendering
+        let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
         // the pipeline layout defines the interface between the pipeline
         // and the external GPU resources (textures, uniforms, storage buffers)
@@ -465,30 +449,6 @@ impl Application<'_> {
             cache: None,
         });
 
-        // // allocate buffers on the GPU's VRAM and copy our data across
-        // let vertex_buffer = device.create_buffer_init(
-        //     &wgpu::util::BufferInitDescriptor {
-        //         label: Some("Vertex Buffer"),
-        //         // our data to be copied; bytemuck safely converts &[Vertex] into &[u8]
-        //         contents: bytemuck::cast_slice(VERTICES),
-        //         // tell GPU that this buffer is for vertex data during draw calls
-        //         // this puts it in a memory region optimized for fast reads by shader cores
-        //         // if writing to buffer from CPU often, use COPY_DST
-        //         usage: wgpu::BufferUsages::VERTEX,
-        //     }
-        // );
-        // let index_buffer = device.create_buffer_init(
-        //     // same as vertex buffer
-        //     &wgpu::util::BufferInitDescriptor {
-        //         label: Some("Index Buffer"),
-        //         contents: bytemuck::cast_slice(INDICES),
-        //         usage: wgpu::BufferUsages::INDEX,
-        //     }
-        // );
-
-        // // store count of all indices to tell GPU how many to draw later
-        // let num_indices = INDICES.len() as u32;
-
         let mut application = Application {
             window,
             surface: ManuallyDrop::new(surface),
@@ -498,8 +458,6 @@ impl Application<'_> {
             queue,
             config,
             render_pipeline,
-            diffuse_texture,
-            diffuse_bind_group,
             camera,
             camera_controller,
             camera_buffer,
@@ -657,10 +615,12 @@ impl Application<'_> {
         // sets the render pipeline and buffers, and draw our frame
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-        render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-
-        render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera_bind_group);
+        // render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+        render_pass.draw_model_instanced(
+            &self.obj_model,
+            0..self.instances.len() as u32,
+            &self.camera_bind_group
+        );
 
         self.debug.draw_calls += 1;
         // self.debug.rendered_tris += (self.num_indices / 3) * self.instances.len() as u32;
@@ -675,18 +635,8 @@ impl Application<'_> {
         frame.present()
     }
 }
-
-#[rustfmt::skip]
-// wgpu's normalized device coordinates have the y-axis/x-axis range -1.0 to +1.0
-// and z-axis range 0.0 to +1.0; cgmath uses OpenGL's coordinate system, so
-// this matrix scales/translates to account for that
-pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 0.5, 0.5,
-    0.0, 0.0, 0.0, 1.0,
-);
  
+ #[derive(Debug)]
 struct Camera {
     // position of the camera in 3D world space
     eye: cgmath::Point3<f32>,
@@ -709,10 +659,23 @@ impl Camera {
         // world space -> view space
         // moves and rotates the whole world so the camera is at (0,0,0) looking down -Z axis
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
+
         // view space -> ndc space (normalized device coordinates)
         // squashes the viewing frustrum (a pyramid-ish) into a perfect cube (the ndc)
         // warps the scene to account for depth (like far objects look closer to the middle)
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
+
+        #[rustfmt::skip]
+        // wgpu's normalized device coordinates have the y-axis/x-axis range -1.0 to +1.0
+        // and z-axis range 0.0 to +1.0; cgmath uses OpenGL's coordinate system, so
+        // this matrix scales/translates to account for that
+        pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 0.5, 0.5,
+            0.0, 0.0, 0.0, 1.0,
+        );
+
         OPENGL_TO_WGPU_MATRIX * proj * view
     }
 }
