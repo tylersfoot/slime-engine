@@ -58,8 +58,8 @@ impl Window {
         
         unsafe {
             // get the raw window handle
-            if let Ok(window_handle) = self.inner.window_handle() {
-                if let RawWindowHandle::Win32(handle) = window_handle.as_raw() {
+            if let Ok(window_handle) = self.inner.window_handle()
+                && let RawWindowHandle::Win32(handle) = window_handle.as_raw() {
                     let hwnd = handle.hwnd.get() as HWND;
                     
                     let mut point = POINT {
@@ -71,7 +71,6 @@ impl Window {
                     ClientToScreen(hwnd, &mut point);
                     SetCursorPos(point.x, point.y);
                 }
-            }
         }
     }
 }

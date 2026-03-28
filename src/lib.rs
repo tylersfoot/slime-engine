@@ -12,22 +12,76 @@ mod window;
 mod texture;
 mod model;
 mod resources;
+mod camera;
 
-use window::*;
-use texture::*;
+use window::Window;
 use model::{DrawModel, Vertex, Model};
+use camera::{Camera, CameraUniform, CameraController};
 
-// for instancing test
 const NUM_INSTANCES_PER_ROW: u32 = 100;
-const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-    0.0,
-    NUM_INSTANCES_PER_ROW as f32 * 0.5,
-);
 // starting window size
 const WIDTH: usize = 640;
 const HEIGHT: usize = 480;
 
+struct Instance {
+    position: cgmath::Vector3<f32>,
+    // quaternion is used to represent rotation
+    rotation: cgmath::Quaternion<f32>,
+}
+ 
+impl Instance {
+    fn to_raw(&self) -> InstanceRaw {
+        InstanceRaw {
+            model: (cgmath::Matrix4::from_translation(self.position)
+                * cgmath::Matrix4::from(self.rotation))
+            .into(),    
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    model: [[f32; 4]; 4],
+}
+ 
+impl InstanceRaw {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            // we use a step mode of Instance, where our shaders will only change 
+            // to use the next instance when the shader starts processing a new instance
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                // a mat4 takes up 4 vertex slots as it is technically 4 vec4s
+                // we need to define a slot for each vec4 and reassemble in the shader
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    // while our vertex shader only uses locations 0, and 1 now, in later tutorials we'll
+                    // be using 2, 3, and 4, for Vertex; we'll start at slot 5 not conflict with them later
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
 
 // a struct to hold real-time debug information
 struct DebugInfo {
@@ -628,187 +682,7 @@ impl Application<'_> {
     }
 }
  
- #[derive(Debug)]
-struct Camera {
-    // position of the camera in 3D world space
-    eye: cgmath::Point3<f32>,
-    // the point in space the camera is looking at
-    // the direction the camera is facing = the vector from eye to target
-    target: cgmath::Point3<f32>,
-    // defines the "up" direction for the camera so it doesn't roll on its side
-    up: cgmath::Vector3<f32>,
-    // aspect ratio of the screen (w/h) to prevent stretched/squished image
-    aspect: f32,
-    // vertical field of view in degrees; basically zoom
-    fovy: f32,
-    // near/far clipping planes; any geometry outside this range will not be drawn
-    znear: f32,
-    zfar: f32,
-}
- 
-impl Camera {
-    fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        // world space -> view space
-        // moves and rotates the whole world so the camera is at (0,0,0) looking down -Z axis
-        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-
-        // view space -> ndc space (normalized device coordinates)
-        // squashes the viewing frustrum (a pyramid-ish) into a perfect cube (the ndc)
-        // warps the scene to account for depth (like far objects look closer to the middle)
-        let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-
-        #[rustfmt::skip]
-        // wgpu's normalized device coordinates have the y-axis/x-axis range -1.0 to +1.0
-        // and z-axis range 0.0 to +1.0; cgmath uses OpenGL's coordinate system, so
-        // this matrix scales/translates to account for that
-        pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 0.5, 0.5,
-            0.0, 0.0, 0.0, 1.0,
-        );
-
-        OPENGL_TO_WGPU_MATRIX * proj * view
-    }
-}
- 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniform {
-    // convert cgmath Matrix4 -> 4x4 f32 array
-    view_proj: [[f32; 4]; 4],
-}
- 
-impl CameraUniform {
-    fn new() -> Self {
-        use cgmath::SquareMatrix;
-        Self {
-            view_proj: cgmath::Matrix4::identity().into(),
-        }
-    }
- 
-    fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_proj = camera.build_view_projection_matrix().into();
-    }
-}
- 
-struct CameraController {
-    speed: f32,
-    is_up_pressed: bool,
-    is_down_pressed: bool,
-    is_forward_pressed: bool,
-    is_backward_pressed: bool,
-    is_left_pressed: bool,
-    is_right_pressed: bool,
-}
- 
-impl CameraController {
-    fn new(speed: f32) -> Self {
-        Self {
-            speed,
-            is_up_pressed: false,
-            is_down_pressed: false,
-            is_forward_pressed: false,
-            is_backward_pressed: false,
-            is_left_pressed: false,
-            is_right_pressed: false,
-        }
-    }
- 
-    fn handle_keys(&mut self, keys: &[Key]) {
-        // handles key inputs
-        self.is_up_pressed = keys.contains(&Key::Space);
-        self.is_down_pressed = keys.contains(&Key::LeftShift);
-        self.is_forward_pressed = keys.contains(&Key::W) | keys.contains(&Key::Up);
-        self.is_left_pressed = keys.contains(&Key::A) | keys.contains(&Key::Left);
-        self.is_backward_pressed = keys.contains(&Key::S) | keys.contains(&Key::Down);
-        self.is_right_pressed = keys.contains(&Key::D) | keys.contains(&Key::Right);
-    }
-
-    fn update_camera(&self, camera: &mut Camera) {
-        // move the camera's eye based on inputs
-        let forward = (camera.target - camera.eye).normalize();
-        let right = forward.cross(camera.up);
-
-        if self.is_forward_pressed {
-            camera.eye += forward * self.speed;
-        }
-        if self.is_backward_pressed {
-            camera.eye -= forward * self.speed;
-        }
-
-        if self.is_right_pressed {
-            camera.eye += right * self.speed;
-        }
-        if self.is_left_pressed {
-            camera.eye -= right * self.speed;
-        }
-    }
-}
-
-struct Instance {
-    position: cgmath::Vector3<f32>,
-    // quaternion is used to represent rotation
-    rotation: cgmath::Quaternion<f32>,
-}
- 
-impl Instance {
-    fn to_raw(&self) -> InstanceRaw {
-        InstanceRaw {
-            model: (cgmath::Matrix4::from_translation(self.position)
-                * cgmath::Matrix4::from(self.rotation))
-            .into(),    
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct InstanceRaw {
-    model: [[f32; 4]; 4],
-}
- 
-impl InstanceRaw {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-            // we use a step mode of Instance, where our shaders will only change 
-            // to use the next instance when the shader starts processing a new instance
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                // a mat4 takes up 4 vertex slots as it is technically 4 vec4s
-                // we need to define a slot for each vec4 and reassemble in the shader
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    // while our vertex shader only uses locations 0, and 1 now, in later tutorials we'll
-                    // be using 2, 3, and 4, for Vertex; we'll start at slot 5 not conflict with them later
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
-                    shader_location: 8,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
-        }
-    }
-}
- 
 pub fn run() {
-    // env_logger::init();
-
     // init the application; since Application::new() is async, 
     // (requesting adaptor/device from OS takes time)
     // pollster lets us call it in our sync fn and wait here until it's done 
