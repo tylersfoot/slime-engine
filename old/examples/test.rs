@@ -24,7 +24,7 @@ fn main() {
         HEIGHT,
         WindowOptions {
             resize: false,
-            scale: minifb::Scale::X4,
+            scale: minifb::Scale::X2,
             scale_mode: minifb::ScaleMode::AspectRatioStretch,
             ..WindowOptions::default()
         },
@@ -49,8 +49,8 @@ fn main() {
 
     load_object_into_scene(
         &mut scene, 
-        "objects/crazycorn.obj", 
-        "objects/crazycorn.mtl",
+        "assets/objects/crazycorn.obj", 
+        "assets/objects/crazycorn.mtl",
         "crazycorn",
         Transform {
             position: Position { x: 30.0, y: 0.0, z: 0.0 },

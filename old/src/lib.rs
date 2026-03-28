@@ -7,7 +7,6 @@ use std::ops::Mul;
 
 pub mod object_import;
 pub mod window;
-pub mod gpu;
 
 use object_import::*;
 

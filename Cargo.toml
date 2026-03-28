@@ -10,11 +10,11 @@ repository = "https://github.com/tylersfoot/slime-engine"
 minifb = "0.28.0"
 winapi = "0.3.9"
 raw-window-handle = "0.6"
-rand = "0.9.2"
-nalgebra = "0.34.0"
+rand = "0.10.0"
+# nalgebra = "0.34.0"
 slotmap = "1.0.7"
-# gpu stuff
-glam = "0.28.0"
+# ---- gpu stuff
+# glam = "0.28.0"
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
@@ -43,5 +43,3 @@ too-many-arguments = "allow"
 # restriction = { level = "warn", priority = -1 }
 # nursery = { level = "warn", priority = -1 }
 # cargo = { level = "warn", priority = -1 }
-
-

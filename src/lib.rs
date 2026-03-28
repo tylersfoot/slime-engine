@@ -179,23 +179,12 @@ impl Application<'_> {
             .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Device"),
                     required_features: wgpu::Features::empty(),
-                    // disable some features if WebGL
-                    required_limits: if cfg!(target_arch = "wasm32") {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    },
+                    required_limits:  wgpu::Limits::default(),
                     memory_hints: Default::default(),
                     trace: wgpu::Trace::Off,
             })
             .await
             .expect("Failed to create device");
-
-        // make all errors forward to the console before panicking so they also show up on the web
-        device.on_uncaptured_error(Box::new(|err| {
-            log::error!("{err}");
-            panic!("{}", err);
-        }));
 
         // get what the GPU is capable of (formats, vsync modes, etc.)
         log::warn!("surface");
@@ -815,10 +804,10 @@ impl InstanceRaw {
 }
  
 pub fn run() {
-    env_logger::init();
+    // env_logger::init();
 
     // init the application; since Application::new() is async, 
-    // because requesting adaptor/device from OS takes time)
+    // (requesting adaptor/device from OS takes time)
     // pollster lets us call it in our sync fn and wait here until it's done 
     let mut application = pollster::block_on(Application::new());
 

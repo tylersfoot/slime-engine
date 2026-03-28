@@ -1,3 +1,5 @@
+// this build script gets run before the rest of the code is compiled
+// it copies the `res/` into the output directory 
 use anyhow::*;
 use fs_extra::copy_items;
 use fs_extra::dir::CopyOptions;

@@ -2,7 +2,6 @@ use anyhow::*;
 use image::GenericImageView;
 
 pub struct Texture {
-    #[allow(unused)]
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
@@ -12,7 +11,6 @@ impl Texture {
     pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
     pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-    #[allow(unused)]
     pub fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -60,7 +58,6 @@ impl Texture {
         }
     }
 
-    #[allow(unused)]
     pub fn create_depth_texture_non_comparison_sampler(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
