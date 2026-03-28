@@ -128,14 +128,6 @@ impl Drop for Application<'_> {
 
 impl Application<'_> {
     async fn new() -> Self {
-        // the instance is a handle to the GPU
-        // BackendBit::PRIMARY -> Vulkan + Metal + DX12 + Browser WebGPU
-        log::warn!("wgpu setup");
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY, // selects best available graphics API
-            ..Default::default()
-        });
-
         // create the physical window
         let mut window = Window::new(
             "awesome window",
@@ -146,10 +138,19 @@ impl Application<'_> {
                 ..Default::default()
             },
         )
-        .unwrap_or_else(|e| {
-            panic!("{}", e);
-        });
+        .unwrap_or_else(|e| panic!("{}", e));
         window.set_target_fps(0); // uncapped framerate
+
+        // the instance is a handle to the GPU
+        // BackendBit::PRIMARY -> Vulkan + Metal + DX12 + Browser WebGPU
+        log::warn!("wgpu setup");
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            flags: Default::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: Some(Box::new(window.get_display_wrapper())),
+        });
 
         // mini_fb's window type isn't `Send` which is required for wgpu's `WindowHandle` trait
         // so have to use the unsafe variant to create a surface directly from the window handle
@@ -160,8 +161,7 @@ impl Application<'_> {
                 wgpu::SurfaceTargetUnsafe::from_window(&window.inner)
                     .expect("Failed to create surface target."),
             )
-        }
-        .expect("Failed to create surface");
+        }.expect("Failed to create surface");
 
         // get the handle to the physical GPU
         let adapter = instance
@@ -182,6 +182,7 @@ impl Application<'_> {
                     required_limits:  wgpu::Limits::default(),
                     memory_hints: Default::default(),
                     trace: wgpu::Trace::Off,
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
             })
             .await
             .expect("Failed to create device");
@@ -349,11 +350,11 @@ impl Application<'_> {
                 // a bind group is a way to group resources that a shader needs access to
                 // ex. a group for scene data, material-specific data
                 bind_group_layouts: &[
-                    &texture_bind_group_layout,
-                    &camera_bind_group_layout
+                    Some(&texture_bind_group_layout),
+                    Some(&camera_bind_group_layout)
                 ],
                 // a way to send very small amounts of data to shaders very quickly, but limited
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         // bring the shaders, data layout, and state settings together into a pipeline object
@@ -417,12 +418,12 @@ impl Application<'_> {
             // stencil buffer: lets you perform masking operations
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: texture::Texture::DEPTH_FORMAT,
-                depth_write_enabled: true,
+                depth_write_enabled: Some(true),
                 // tells us when pixels are discarded
                 // Less: pixels will be drawn front to back
                 // other options: Never, Less, Equal, LessEqual,
                 // Greater, NotEqual, GreaterEqual, Always
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -434,7 +435,7 @@ impl Application<'_> {
                 alpha_to_coverage_enabled: false,
             },
             // render to multiple views (texture layers) in a single draw; used for VR
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -524,27 +525,28 @@ impl Application<'_> {
 
         let frame = match self.surface.get_current_texture() {
             // request a buffer/texture/frame from the swap chain
-            Ok(surface_texture) => surface_texture,
-            Err(err) => match err {
-                wgpu::SurfaceError::Timeout => {
-                    // took too long to get a new frame; try again next frame
-                    log::warn!("Surface texture acquisition timed out.");
-                    return;
-                }
-                wgpu::SurfaceError::Outdated => {
-                    // window resized or something else made the swap chain obsolete
-                    self.configure_surface();
-                    return;
-                }
-                wgpu::SurfaceError::Lost => {
-                    // swap chain was lost for a serious reason (like display driver reset)
-                    log::error!("Swapchain has been lost.");
-                    self.configure_surface();
-                    return;
-                }
-                wgpu::SurfaceError::OutOfMemory => panic!("Out of memory on surface acquisition"),
-                wgpu::SurfaceError::Other => panic!("Other surface error, check log for details"),
-            },
+            wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
+            wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
+                self.configure_surface();
+                surface_texture
+            }
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => {
+                // skip this frame
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                // window resized or something else made the swap chain obsolete
+                self.configure_surface();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                // swap chain was lost for a serious reason (like display driver reset)
+                log::error!("Swapchain has been lost.");
+                self.configure_surface();
+                return;
+            }
         };
 
         // we draw to a TextureView instead of directly to the texture
@@ -598,6 +600,7 @@ impl Application<'_> {
                 stencil_ops: None,
             }),
             timestamp_writes: None,
+            multiview_mask: None,
             occlusion_query_set: None,
         });
 

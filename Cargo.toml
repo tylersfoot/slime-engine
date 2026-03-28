@@ -9,21 +9,21 @@ repository = "https://github.com/tylersfoot/slime-engine"
 [dependencies]
 minifb = "0.28.0"
 winapi = "0.3.9"
-raw-window-handle = "0.6"
+raw-window-handle = "0.6.2"
 rand = "0.10.0"
 # nalgebra = "0.34.0"
-slotmap = "1.0.7"
+slotmap = "1.1.1"
 # ---- gpu stuff
 # glam = "0.28.0"
-anyhow = "1.0"
-env_logger = "0.10"
-log = "0.4"
-wgpu = "26.0.1"
-pollster = "0.3"
-bytemuck = { version = "1.16", features = [ "derive" ] }
-image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+anyhow = "1.0.102"
+env_logger = "0.11.10"
+log = "0.4.29"
+wgpu = "29.0.1"
+pollster = "0.4.0"
+bytemuck = { version = "1.25.0", features = [ "derive" ] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 cgmath = "0.18.0"
-tobj = { version = "3.2", default-features = false, features = ["async"]}
+tobj = "4.0.3"
 
 [build-dependencies]
 anyhow = "1.0"

@@ -1,4 +1,31 @@
 use minifb::WindowOptions;
+use raw_window_handle::{
+    DisplayHandle,
+    HandleError,
+    HasDisplayHandle,
+    HasWindowHandle,
+    RawDisplayHandle,
+    RawWindowHandle
+};
+
+#[derive(Debug)]
+pub struct StaticDisplayWrapper(pub RawDisplayHandle);
+
+// we have to explicitly implement Send/Sync because RawDisplayHandle
+// contains raw pointers that Rust assumes aren't thread safe
+unsafe impl Send for StaticDisplayWrapper {}
+unsafe impl Sync for StaticDisplayWrapper {}
+
+// needed for passing display handle during instance creation
+impl HasDisplayHandle for StaticDisplayWrapper {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        // SAFETY: the window is guaranteed to outlive the surface
+        // since we're ensuring so in Application's Drop impl
+        unsafe {
+            Ok(DisplayHandle::borrow_raw(self.0))
+        }
+    }
+}
 
 pub struct Window {
     // wraps minifb's Window to add custom functionality
@@ -13,26 +40,37 @@ impl Window {
         })
     }
 
+    // helper to grab wgpu display wrapper
+    pub fn get_display_wrapper(&self) -> StaticDisplayWrapper {
+        let raw_display = self.inner
+            .display_handle()
+            .expect("Failed to get display handle")
+            .as_raw();
+
+        StaticDisplayWrapper(raw_display)
+    }
+
     pub fn set_mouse_pos(&mut self, x: f32, y: f32) {
         // set cursor position relative to the window using raw window handle
         #[cfg(target_os = "windows")] // only windows for now
         use winapi::um::winuser::{SetCursorPos, ClientToScreen};
         use winapi::shared::windef::{HWND, POINT};
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        
         unsafe {
             // get the raw window handle
-            if let Ok(window_handle) = self.inner.window_handle()
-                && let RawWindowHandle::Win32(handle) = window_handle.as_raw() {
-                let hwnd = handle.hwnd.get() as HWND;
-                
-                let mut point = POINT {
-                    x: x as i32,
-                    y: y as i32,
-                };
+            if let Ok(window_handle) = self.inner.window_handle() {
+                if let RawWindowHandle::Win32(handle) = window_handle.as_raw() {
+                    let hwnd = handle.hwnd.get() as HWND;
+                    
+                    let mut point = POINT {
+                        x: x as i32,
+                        y: y as i32,
+                    };
 
-                // convert client coordinates to screen coordinates
-                ClientToScreen(hwnd, &mut point);
-                SetCursorPos(point.x, point.y);
+                    // convert client coordinates to screen coordinates
+                    ClientToScreen(hwnd, &mut point);
+                    SetCursorPos(point.x, point.y);
+                }
             }
         }
     }
