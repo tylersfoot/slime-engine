@@ -15,7 +15,7 @@ mod resources;
 mod camera;
 
 use window::Window;
-use model::{DrawModel, Vertex, Model};
+use model::{DrawModel, Vertex, Model, DrawLight};
 use camera::{Camera, CameraUniform, CameraController};
 
 const NUM_INSTANCES_PER_ROW: u32 = 100;
@@ -31,10 +31,11 @@ struct Instance {
  
 impl Instance {
     fn to_raw(&self) -> InstanceRaw {
+        let model = cgmath::Matrix4::from_translation(self.position)
+            * cgmath::Matrix4::from(self.rotation);
         InstanceRaw {
-            model: (cgmath::Matrix4::from_translation(self.position)
-                * cgmath::Matrix4::from(self.rotation))
-            .into(),    
+            model: model.into(),
+            normal: cgmath::Matrix3::from(self.rotation).into(),  
         }
     }
 }
@@ -43,6 +44,7 @@ impl Instance {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct InstanceRaw {
     model: [[f32; 4]; 4],
+    normal: [[f32; 3]; 3],
 }
  
 impl InstanceRaw {
@@ -78,9 +80,34 @@ impl InstanceRaw {
                     shader_location: 8,
                     format: wgpu::VertexFormat::Float32x4,
                 },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 19]>() as wgpu::BufferAddress,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 22]>() as wgpu::BufferAddress,
+                    shader_location: 11,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
             ],
         }
     }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+// represents a colored point in space
+struct LightUniform {
+    position: [f32; 3],
+    _padding: u32,
+    color: [f32; 3],
+    _padding2: u32,
 }
 
 // a struct to hold real-time debug information
@@ -120,6 +147,99 @@ impl DebugInfo {
     }
 }
 
+fn create_render_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
+    vertex_layouts: &[wgpu::VertexBufferLayout],
+    shader: wgpu::ShaderModuleDescriptor,
+    label: Option<&str>,
+) -> wgpu::RenderPipeline {
+    // brings the shaders, data layout, and state settings together into a pipeline
+    let shader = device.create_shader_module(shader);
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label,
+        layout: Some(layout),
+        // configures the vertex stage of the pipeline
+        vertex: wgpu::VertexState {
+            module: &shader,
+            // start at function 'vs_main' in the shader
+            entry_point: Some("vs_main"),
+            // tells the pipeline how the vertex buffer data is laid out
+            buffers: vertex_layouts,
+            compilation_options: Default::default(),
+        },
+        // configures the fragment stage of the pipeline
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            // start at function 'fs_main' in the shader
+            entry_point: Some("fs_main"),
+            // defines what the fragment shader is writing its output to
+            targets: &[
+                // defines a single output buffer (texture)
+                Some(wgpu::ColorTargetState {
+                    // must match format of surface (sanity check)
+                    format: color_format,
+                    // REPLACE: when the shader outputs a color, replace the previous color
+                    // ALPHABLENDING: combine new color with old color based on transparency 
+                    blend: Some(wgpu::BlendState {
+                        alpha: wgpu::BlendComponent::REPLACE,
+                        color: wgpu::BlendComponent::REPLACE,
+                    }),
+                    // can write to all color channels (rgba)
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            ],
+            compilation_options: Default::default(),
+        }),
+        // tells the GPU's rasterizer stage how to interpret the vertex data
+        primitive: wgpu::PrimitiveState {
+            // take buffer vertices 3 at a time as a list of independent triangles
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw, // winding rotation
+            cull_mode: Some(wgpu::Face::Back), // dont render triangles facing away
+            // how to fill the triangles
+            // Fill: color whole triangle
+            // Line: wireframe
+            // Point: draw points at vertices
+            // Line/Point requires Features::NON_FILL_POLYGON_MODE
+            polygon_mode: wgpu::PolygonMode::Fill,
+            // dont clip outside depth range 0.0-1.0; requires Features::DEPTH_CLIP_CONTROL
+            unclipped_depth: false,
+            // normally pixels are shaded if center falls inside triangle
+            // this will shade if any part of pixel lies inside triangle
+            // requires Features::CONSERVATIVE_RASTERIZATION
+            conservative: false,
+        },
+        // configure depth/stencil buffers
+        // depth buffer: a texture that stores the depth of every pixel
+        // stencil buffer: lets you perform masking operations
+        depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+            format,
+            depth_write_enabled: Some(true),
+            // tells us when pixels are discarded
+            // Less: pixels will be drawn front to back
+            // other options: Never, Less, Equal, LessEqual,
+            // Greater, NotEqual, GreaterEqual, Always
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        // configures Multi-Sample Anti-Aliasing (MSAA)
+        multisample: wgpu::MultisampleState {
+            // amount of samples per pixel; 1 = not using MSAA
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        // render to multiple views (texture layers) in a single draw; used for VR
+        multiview_mask: None,
+        cache: None,
+    })
+}
 
 struct Application<'a> {
     // the minifb window object onscreen
@@ -162,6 +282,11 @@ struct Application<'a> {
     #[allow(dead_code)]
     instance_buffer: wgpu::Buffer,
     depth_texture: texture::Texture,
+
+    light_uniform: LightUniform,
+    light_buffer: wgpu::Buffer,
+    light_bind_group: wgpu::BindGroup,
+    light_render_pipeline: wgpu::RenderPipeline,
 
     obj_model: Model,
 
@@ -311,7 +436,7 @@ impl Application<'_> {
             znear: 0.1,
             zfar: 100.0,
         };
-        let camera_controller = CameraController::new(0.2);
+        let camera_controller = CameraController::new(0.02);
  
         // create camera uniform so we can use our camera data in shaders
         let mut camera_uniform = CameraUniform::new();
@@ -319,7 +444,7 @@ impl Application<'_> {
             
         let camera_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
-                label: Some("Camera Buffer"),
+                label: Some("camera_buffer"),
                 contents: bytemuck::cast_slice(&[camera_uniform]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             }
@@ -329,8 +454,7 @@ impl Application<'_> {
             &wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    // only use in vertex shader
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         // means the location of the data in the buffer can change, like if you
@@ -356,7 +480,8 @@ impl Application<'_> {
                 label: Some("camera_bind_group"),
             }
         );
-
+        
+        // instancing
         const SPACE_BETWEEN: f32 = 3.0;
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
@@ -379,7 +504,7 @@ impl Application<'_> {
  
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Instance Buffer"),
+            label: Some("instance_buffer"),
             contents: bytemuck::cast_slice(&instance_data),
             usage: wgpu::BufferUsages::VERTEX,
         });
@@ -390,8 +515,48 @@ impl Application<'_> {
                 .await
                 .unwrap();
 
-        // load/check shader at compile time
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../assets/shaders/shader.wgsl"));
+
+        // add lighting
+        let light_uniform = LightUniform {
+            position: [2.0, 2.0, 2.0],
+            _padding: 0,
+            color: [1.0, 1.0, 1.0],
+            _padding2: 0
+        };
+
+        // use COPY_DST to update light's position
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("light_buffer"),
+            contents: bytemuck::cast_slice(&[light_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let light_bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("light_bind_group_layout"),
+            }
+        );
+ 
+        let light_bind_group = device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &light_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: light_buffer.as_entire_binding(),
+                }],
+                label: Some("light_bind_group"),
+            }
+        );
 
         // create our depth texture for correct z rendering
         let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texture");
@@ -400,98 +565,58 @@ impl Application<'_> {
         // and the external GPU resources (textures, uniforms, storage buffers)
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
+                label: Some("render_pipeline_layout"),
                 // a bind group is a way to group resources that a shader needs access to
                 // ex. a group for scene data, material-specific data
                 bind_group_layouts: &[
                     Some(&texture_bind_group_layout),
-                    Some(&camera_bind_group_layout)
+                    Some(&camera_bind_group_layout),
+                    Some(&light_bind_group_layout),
                 ],
                 // a way to send very small amounts of data to shaders very quickly, but limited
                 immediate_size: 0,
             });
 
-        // bring the shaders, data layout, and state settings together into a pipeline object
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            // configures the vertex stage of the pipeline
-            vertex: wgpu::VertexState {
-                module: &shader,
-                // start at function `vs_main` in the shader
-                entry_point: Some("vs_main"),
-                // tells the pipeline how the vertex buffer data is laid out
-                buffers: &[
-                    model::ModelVertex::desc(),
-                    InstanceRaw::desc(),
+        let render_pipeline = {
+            let shader = wgpu::ShaderModuleDescriptor {
+                label: Some("normal_shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/shader.wgsl").into()),
+            };
+            create_render_pipeline(
+                &device,
+                &render_pipeline_layout,
+                config.format,
+                Some(texture::Texture::DEPTH_FORMAT),
+                &[model::ModelVertex::desc(), InstanceRaw::desc()],
+                shader,
+                Some("render_pipeline"),
+            )
+        };
+
+        let light_render_pipeline = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("light_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    Some(&light_bind_group_layout)
                 ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            // configures the vertex stage of the pipeline
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                // start at function `fs_main` in the shader
-                entry_point: Some("fs_main"),
-                // defines what the fragment shader is writing its output to
-                targets: &[
-                    // defines a single output buffer (texture)
-                    Some(wgpu::ColorTargetState {
-                        // must match format of surface (sanity check)
-                        format: config.format,
-                        // REPLACE: when the shader outputs a color, replace the previous color
-                        // ALPHABLENDING: combine new color with old color based on transparency 
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        // can write to all color channels (rgba)
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            // tells the GPU's rasterizer stage how to interpret vertex data
-            primitive: wgpu::PrimitiveState {
-                // take buffer vertices 3 at a time as a list of independent triangles
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw, // winding rotation
-                cull_mode: Some(wgpu::Face::Back), // dont render triangles facing away
-                // how to fill the triangles
-                // Fill: color whole triangle
-                // Line: wireframe
-                // Point: draw points at vertices
-                // Line/Point requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // dont clip outside depth range 0.0-1.0; requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // normally pixels are shaded if center falls inside triangle
-                // this will shade if any part of pixel lies inside triangle
-                // requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            // configure depth/stencil buffers
-            // depth buffer: a texture that stores the depth of every pixel
-            // stencil buffer: lets you perform masking operations
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: texture::Texture::DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                // tells us when pixels are discarded
-                // Less: pixels will be drawn front to back
-                // other options: Never, Less, Equal, LessEqual,
-                // Greater, NotEqual, GreaterEqual, Always
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            // configures Multi-Sample Anti-Aliasing (MSAA)
-            multisample: wgpu::MultisampleState {
-                // amount of samples per pixel; 1 = not using MSAA
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            // render to multiple views (texture layers) in a single draw; used for VR
-            multiview_mask: None,
-            cache: None,
-        });
+                immediate_size: 0,
+            });
+            let shader = wgpu::ShaderModuleDescriptor {
+                label: Some("light_shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/light.wgsl").into()),
+            };
+            create_render_pipeline(
+                &device,
+                &layout,
+                config.format,
+                Some(texture::Texture::DEPTH_FORMAT),
+                &[model::ModelVertex::desc()],
+                shader,
+                Some("light_render_pipeline"),
+            )
+        };
+
 
         let mut application = Application {
             window,
@@ -510,6 +635,10 @@ impl Application<'_> {
             instances,
             instance_buffer,
             depth_texture,
+            light_uniform,
+            light_buffer,
+            light_bind_group,
+            light_render_pipeline,
             obj_model,
             debug: DebugInfo::new(),
         };
@@ -568,6 +697,19 @@ impl Application<'_> {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+
+        let old_position: cgmath::Vector3<_> = self.light_uniform.position.into();
+        self.light_uniform.position = (
+            cgmath::Quaternion::from_axis_angle(
+                (0.0, 1.0, 0.0).into(),
+                cgmath::Deg(0.02)
+            ) * old_position
+        ).into();
+        self.queue.write_buffer(
+            &self.light_buffer,
+            0,
+            bytemuck::cast_slice(&[self.light_uniform]),
+        );
     }
 
     pub fn draw_frame(&mut self) {
@@ -614,12 +756,12 @@ impl Application<'_> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Main encoder"),
+                label: Some("render_encoder"),
             });
 
         // begins a render pass, a block of drawing operations that target the same set of framebuffers/attachments
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
+            label: Some("render_pass"),
             // specifies where the final colors will be written
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
@@ -660,18 +802,26 @@ impl Application<'_> {
 
         // sets the render pipeline and buffers, and draw our frame
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        
+        render_pass.set_pipeline(&self.light_render_pipeline);
+        render_pass.draw_light_model(
+            &self.obj_model,
+            &self.camera_bind_group,
+            &self.light_bind_group,
+        );
+        
         render_pass.set_pipeline(&self.render_pipeline);
-        // render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
         render_pass.draw_model_instanced(
             &self.obj_model,
             0..self.instances.len() as u32,
-            &self.camera_bind_group
+            &self.camera_bind_group,
+            &self.light_bind_group,
         );
 
         self.debug.draw_calls += 1;
         // self.debug.rendered_tris += (self.num_indices / 3) * self.instances.len() as u32;
 
-        drop(render_pass); // manual drop
+        drop(render_pass);
 
         // tell the encoder we are done recording and to package all commands into a command buffer
         let command_buffer = encoder.finish();
@@ -699,9 +849,9 @@ pub fn run() {
         } else {
             application.camera_controller.handle_keys(&keys);
         }
-        if !keys.is_empty() {
+        // if !keys.is_empty() {
             application.update();
-        }
+        // }
 
         if !application.window.is_open() {
             return; // exit if window is closed

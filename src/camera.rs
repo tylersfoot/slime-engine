@@ -50,6 +50,7 @@ impl Camera {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
+    pub view_position: [f32; 4],
     // convert cgmath Matrix4 -> 4x4 f32 array
     pub view_proj: [[f32; 4]; 4],
 }
@@ -57,11 +58,13 @@ pub struct CameraUniform {
 impl CameraUniform {
     pub fn new() -> Self {
         Self {
+            view_position: [0.0; 4],
             view_proj: Matrix4::identity().into(),
         }
     }
  
     pub fn update_view_proj(&mut self, camera: &Camera) {
+        self.view_position = camera.eye.to_homogeneous().into();
         self.view_proj = camera.build_view_projection_matrix().into();
     }
 }
