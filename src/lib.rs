@@ -1,12 +1,12 @@
 #![allow(unused)]
 
 use std::{io::Write, mem::ManuallyDrop};
-use minifb::KeyRepeat;
+use minifb::{KeyRepeat, MouseButton};
 use wgpu::util::DeviceExt;
 use image::GenericImageView;
 pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
 use cgmath::prelude::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod window;
 mod texture;
@@ -14,9 +14,9 @@ mod model;
 mod resources;
 mod camera;
 
-use window::Window;
-use model::{DrawModel, Vertex, Model, DrawLight};
-use camera::{Camera, CameraUniform, CameraController};
+use crate::window::Window;
+use crate::model::{DrawModel, Vertex, Model, DrawLight};
+use crate::camera::{Camera, CameraUniform, CameraController, Projection};
 
 const NUM_INSTANCES_PER_ROW: u32 = 100;
 // starting window size
@@ -273,6 +273,7 @@ struct Application<'a> {
     render_pipeline: wgpu::RenderPipeline,
 
     camera: Camera,
+    projection: Projection,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
@@ -291,6 +292,8 @@ struct Application<'a> {
     obj_model: Model,
 
     debug: DebugInfo,
+
+    window_active: bool,
 }
 
 impl Drop for Application<'_> {
@@ -444,21 +447,23 @@ impl Application<'_> {
             }
         );
 
-        // camera instancing
-        let camera = Camera {
-            eye: (0.0, 5.0, -10.0).into(),
-            target: (0.0, 0.0, 0.0).into(),
-            up: cgmath::Vector3::unit_y(),
-            aspect: config.width as f32 / config.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
-        };
-        let camera_controller = CameraController::new(0.02);
+        let camera = Camera::new(
+            (0.0, 5.0, 10.0),
+            cgmath::Deg(-90.0),
+            cgmath::Deg(-20.0)
+        );
+        let projection = Projection::new(
+            config.width,
+            config.height,
+            cgmath::Deg(45.0),
+            0.1,
+            100.0
+        );
+        let camera_controller = CameraController::new(4.0, 0.4);
  
         // create camera uniform so we can use our camera data in shaders
         let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera);
+        camera_uniform.update_view_proj(&camera, &projection);
             
         let camera_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -538,7 +543,7 @@ impl Application<'_> {
         let light_uniform = LightUniform {
             position: [2.0, 2.0, 2.0],
             _padding: 0,
-            color: [1.0, 1.0, 1.0],
+            color: [1.0, 0.96, 0.89],
             _padding2: 0
         };
 
@@ -646,6 +651,7 @@ impl Application<'_> {
             config,
             render_pipeline,
             camera,
+            projection,
             camera_controller,
             camera_buffer,
             camera_bind_group,
@@ -659,6 +665,7 @@ impl Application<'_> {
             light_render_pipeline,
             obj_model,
             debug: DebugInfo::new(),
+            window_active: false,
         };
 
         // apply the config to the surface
@@ -700,16 +707,16 @@ impl Application<'_> {
         // set the new window sizes
         self.config.width = width as u32;
         self.config.height = height as u32;
-        self.camera.aspect = self.config.width as f32 / self.config.height as f32;
+        self.projection.resize(width as u32, height as u32);
         // reconfigure the surface
         self.surface.configure(&self.device, &self.config);
         // recreate depth texture with new size
         self.depth_texture = texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
     }
 
-    fn update(&mut self) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera);
+    fn update(&mut self, dt: Duration) {
+        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.camera_uniform.update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
@@ -720,7 +727,7 @@ impl Application<'_> {
         self.light_uniform.position = (
             cgmath::Quaternion::from_axis_angle(
                 (0.0, 1.0, 0.0).into(),
-                cgmath::Deg(0.02)
+                cgmath::Deg(60.0 * dt.as_secs_f32())
             ) * old_position
         ).into();
         self.queue.write_buffer(
@@ -855,21 +862,64 @@ pub fn run() {
     // (requesting adaptor/device from OS takes time)
     // pollster lets us call it in our sync fn and wait here until it's done 
     let mut application = pollster::block_on(Application::new());
+    let mut last_render_time = Instant::now();
 
     // main program loop
     loop {
         // processes events like key presses, mouse movements, close button, etc.
         application.window.update();
 
+        // handle special keys
         let keys = application.window.get_keys();
-        if keys.contains(&Key::Escape) {
-            return; // exit when esc pressed
-        } else {
-            application.camera_controller.handle_keys(&keys);
+        if keys.contains(&Key::Backspace) { return }
+        if (keys.contains(&Key::Escape) && application.window_active) {
+            // unlock mouse
+            application.window.set_cursor_visibility(true);
+            application.window_active = false;
         }
-        // if !keys.is_empty() {
-            application.update();
-        // }
+
+        let mouse_pressed = application.window.get_mouse_down(MouseButton::Left);
+        if (mouse_pressed && !application.window_active) {
+            // lock mouse
+            application.window.set_cursor_visibility(false);
+            application.window_active = true;
+
+            // snap immediatly to center to camera doesn't jump
+            let (width, height) = application.window.get_size();
+            application.window.set_mouse_pos((width / 2) as f32, (height / 2) as f32);
+        }
+
+        // handle scroll wheel
+        let scroll_wheel_delta = application.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
+        
+        // handle infinite mouse movement
+        let mut mouse_delta = (0.0, 0.0);
+        if application.window_active
+            && let Some((x, y)) = application.window.get_mouse_pos(MouseMode::Pass) {
+                let (width, height) = application.window.get_size();
+                let center_x = (width / 2) as f32;
+                let center_y = (height / 2) as f32;
+
+                let dx = x - center_x;
+                let dy = y - center_y;
+
+                // only update and snap is mouse actually moved
+                if dx != 0.0 || dy != 0.0 {
+                    mouse_delta = (dx, dy);
+                    application.window.set_mouse_pos(center_x, center_y);
+                }
+        }
+
+        // handle inputs
+        application.camera_controller.handle_keys(&keys);
+        application.camera_controller.handle_mouse(mouse_delta.0, mouse_delta.1);
+        application.camera_controller.handle_mouse_scroll(scroll_wheel_delta);
+
+        // calculate delta time
+        let now = Instant::now();
+        let dt = now - last_render_time;
+        last_render_time = now;
+        application.update(dt);
 
         if !application.window.is_open() {
             return; // exit if window is closed
