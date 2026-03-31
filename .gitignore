@@ -16,3 +16,5 @@ target
 
 Cargo.lock
 
+# resources (like models) - big file sizes
+res/*
