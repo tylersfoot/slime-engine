@@ -456,10 +456,10 @@ impl Application<'_> {
             config.width,
             config.height,
             cgmath::Deg(45.0),
-            0.1,
+            0.02,
             100.0
         );
-        let camera_controller = CameraController::new(4.0, 0.4);
+        let camera_controller = CameraController::new(2.0, 0.4);
  
         // create camera uniform so we can use our camera data in shaders
         let mut camera_uniform = CameraUniform::new();
@@ -639,7 +639,6 @@ impl Application<'_> {
                 Some("light_render_pipeline"),
             )
         };
-
 
         let mut application = Application {
             window,

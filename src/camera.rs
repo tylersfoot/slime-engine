@@ -78,6 +78,7 @@ pub struct CameraController {
     rotate_horizontal: f32,
     rotate_vertical: f32,
     scroll: f32,
+    sprint: bool,
     speed: f32,
     sensitivity: f32,
 }
@@ -94,6 +95,7 @@ impl CameraController {
             rotate_horizontal: 0.0,
             rotate_vertical: 0.0,
             scroll: 0.0,
+            sprint: false,
             speed,
             sensitivity,
         }
@@ -106,8 +108,9 @@ impl CameraController {
         self.amount_left = f32::from((keys.contains(&Key::A) | keys.contains(&Key::Left)) as u8);
         self.amount_right = f32::from((keys.contains(&Key::D) | keys.contains(&Key::Right)) as u8);
         self.amount_up = f32::from(keys.contains(&Key::Space) as u8);
-        self.amount_down = f32::from(keys.contains(&Key::LeftShift) as u8);
+        self.amount_down = f32::from(keys.contains(&Key::LeftCtrl) as u8);
         self.amount_forward = f32::from((keys.contains(&Key::W) | keys.contains(&Key::Up)) as u8);
+        self.sprint = keys.contains(&Key::LeftShift);
     }
 
     pub fn handle_mouse(&mut self, mouse_dx: f32, mouse_dy: f32) {
@@ -122,24 +125,29 @@ impl CameraController {
     pub fn update_camera(&mut self, camera: &mut Camera, dt: Duration) {
         let dt = dt.as_secs_f32(); // delta time for consistent speed over time
 
+        let sprint_speed = 4.0;
+        // scale sprint mult from [1.0, sprint_speed]
+        let sprint_mult = 1.0_f32.max(sprint_speed * f32::from(self.sprint as u8));
+        let speed = self.speed * sprint_mult;
+
         // move forward/backward and left/right
         let (yaw_sin, yaw_cos) = camera.yaw.0.sin_cos();
         let forward = Vector3::new(yaw_cos, 0.0, yaw_sin).normalize();
         let right = Vector3::new(-yaw_sin, 0.0, yaw_cos).normalize();
-        camera.position += forward * (self.amount_forward - self.amount_backward) * self.speed * dt;
-        camera.position += right * (self.amount_right - self.amount_left) * self.speed * dt;
+        camera.position += forward * (self.amount_forward - self.amount_backward) * speed * dt;
+        camera.position += right * (self.amount_right - self.amount_left) * speed * dt;
 
         // move in/out (zoom)
         // note: this isn't actual zoom, the camera's position changes when zooming
         // added to make it easier to get closer to an object to focus on
         let (pitch_sin, pitch_cos) = camera.pitch.0.sin_cos();
         let scrollward = Vector3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize();
-        camera.position += scrollward * self.scroll * self.speed * self.sensitivity * dt;
+        camera.position += scrollward * self.scroll * speed * self.sensitivity * dt;
         self.scroll = 0.0;
 
         // move up/down
         // since we dont use rooo, we can modify the y coordinate directly
-        camera.position.y += (self.amount_up - self.amount_down) * self.speed * dt;
+        camera.position.y += (self.amount_up - self.amount_down) * speed * dt;
 
         // rotate
         camera.yaw += Rad(self.rotate_horizontal) * self.sensitivity * dt;
@@ -183,7 +191,6 @@ impl Projection {
             zfar,
         }
     }
-
     pub fn resize(&mut self, width: u32, height: u32) {
         self.aspect = width as f32 / height as f32;
     }
@@ -194,8 +201,8 @@ impl Projection {
         // warps the scene to account for depth (like far objects look closer to the middle)
         let projection = perspective(self.fovy, self.aspect, self.znear, self.zfar);
 
-        // wgpu's normalized device coordinates have the y-axis/x-axis range -1.0 to +1.0
-        // and z-axis range 0.0 to +1.0; cgmath uses OpenGL's coordinate system, so
+        // wgpu's normalized device coordinates have the y-axis/x-axis range -1 to +1
+        // and z-axis range 0 to +1; cgmath uses OpenGL's coordinate system, so
         // this matrix scales/translates to account for that
         #[rustfmt::skip]
         pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::new(
