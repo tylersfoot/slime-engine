@@ -83,9 +83,12 @@ impl Texture {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(
             &wgpu::SamplerDescriptor {
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                // address_mode_u: wgpu::AddressMode::ClampToEdge,
+                // address_mode_v: wgpu::AddressMode::ClampToEdge,
+                // address_mode_w: wgpu::AddressMode::ClampToEdge,
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                address_mode_w: wgpu::AddressMode::Repeat,
                 mag_filter: wgpu::FilterMode::Nearest,
                 min_filter: wgpu::FilterMode::Nearest,
                 mipmap_filter: wgpu::MipmapFilterMode::Nearest,
@@ -101,6 +104,27 @@ impl Texture {
             view,
             sampler,
         }
+    }
+
+    pub fn from_color(
+        device: &wgpu::Device,  
+        queue: &wgpu::Queue,
+        color: [u8; 4],
+        label: &str,
+        is_normal_map: bool,
+    ) -> Result<Self> {
+        // creates a texture with a colored single pixel
+        let size = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+
+        let img = image::DynamicImage::ImageRgba8(
+            image::ImageBuffer::from_raw(1, 1, color.to_vec()).unwrap()
+        );
+
+        Self::from_image(device, queue, &img, Some(label), is_normal_map)
     }
 
     pub fn from_bytes(

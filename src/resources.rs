@@ -3,6 +3,29 @@ use wgpu::util::DeviceExt;
 
 use crate::{model, texture};
 
+// helper to parse unknown mtl colors/vec3
+fn parse_vec3(value: Option<&String>, default: [f32; 3]) -> [f32; 3] {
+    value.and_then(|s| {
+        let mut parts = s.split_whitespace();
+        Some([
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        ])
+    })
+    .unwrap_or(default)
+}
+
+// helper to parse unknown mtl floats
+fn parse_f32(value: Option<&String>, default: f32) -> f32 {
+    value.and_then(|s| s.trim().parse().ok()).unwrap_or(default)
+}
+
+// helper to clamp colors/vec3 to [0,1]
+fn clamp_color(c: [f32; 3]) -> [f32; 3] {
+    c.map(|x| x.clamp(0.0, 1.0))
+}
+
 pub fn load_string(file_name: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(env!("OUT_DIR"))
         .join("res")
@@ -39,7 +62,10 @@ pub async fn load_model(
     let obj_cursor = Cursor::new(obj_text);
     let mut obj_reader = BufReader::new(obj_cursor);
 
-    // DEPRECIATED FUNCTION HERE
+    // folder the .obj file is in
+    let parent_dir = std::path::Path::new(file_name).parent()
+        .unwrap_or(std::path::Path::new(""));
+
     let (models, obj_materials) = tobj::load_obj_buf(
         &mut obj_reader,
         &tobj::LoadOptions {
@@ -48,22 +74,134 @@ pub async fn load_model(
             ..Default::default()
         },
         |p| {
-            let mat_text = load_string(p.to_str().unwrap()).unwrap();
+            let mat_text = load_string(parent_dir.join(p).to_str().unwrap()).unwrap();
             tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(mat_text)))
         },
     )?;
 
     let mut materials = Vec::new();
     for m in obj_materials? {
-        let diffuse_texture = load_texture(&m.diffuse_texture.unwrap(), false, device, queue)?;
-        let normal_texture = load_texture(&m.normal_texture.unwrap(), true, device, queue)?;
+        // load textures, and use fallbacks if missing
+        // diffuse (map_Kd)
+        let diffuse_texture = if let Some(t) = &m.diffuse_texture {
+            load_texture(parent_dir.join(t).to_str().unwrap(), false, device, queue)?
+        } else {
+            texture::Texture::from_color(
+                device, queue, [255, 255, 255, 255], "default_diffuse", false)?
+        };
+
+        // normal (norm)
+        let normal_texture = if let Some(t) = &m.normal_texture {
+            load_texture(parent_dir.join(t).to_str().unwrap(),true, device, queue)?
+        } else {
+            texture::Texture::from_color(
+                device, queue, [128, 128, 255, 255], "default_normal", false)?
+        };
+
+        // specular color (map_Ks)
+        let specular_texture = if let Some(t) = &m.specular_texture {
+            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
+        } else {
+            texture::Texture::from_color(
+                device, queue, [255, 255, 255, 255], "default_specular", false)?
+        };
+
+        // dissolve/opacity (map_d)
+        let dissolve_texture = if let Some(t) = &m.dissolve_texture {
+            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
+        } else {
+            texture::Texture::from_color(
+                device, queue, [255, 255, 255, 255], "default_dissolve", false)?
+        };
+
+        // ambient occlusion (map_Ka)
+        let ambient_texture = if let Some(t) = &m.ambient_texture {
+            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
+        } else {
+            texture::Texture::from_color(
+                device, queue, [255, 255, 255, 255], "default_ambient", false)?
+        };
+
+        // roughness (map_Pr)
+        let roughness_texture = if let Some(t) = &m.unknown_param.get("map_Pr") {
+            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
+        } else {
+            texture::Texture::from_color(
+                device, queue, [0, 0, 0, 255], "default_roughness", false)?
+        };
+
+        // metallic (map_Pm)
+        let metal_texture = if let Some(t) = m.unknown_param.get("map_Pm") {
+            load_texture(parent_dir.join(t).to_str().unwrap(), false, device, queue)?
+        } else {
+            texture::Texture::from_color(
+                device, queue, [0, 0, 0, 255], "default_metal", false)?
+        };
+
+        // parse keywords
+        let ambient_color = clamp_color(m.ambient.unwrap_or([1.0, 1.0, 1.]));
+        let diffuse_color = clamp_color(m.diffuse.unwrap_or([1.0, 1.0, 1.0]));
+        let specular_color = clamp_color(m.specular.unwrap_or([0.0, 0.0, 0.0]));
+        let emissive_color = clamp_color(parse_vec3(m.unknown_param.get("Ke"), [0.0, 0.0, 0.0]));
+        let transmission_filter = clamp_color(parse_vec3(m.unknown_param.get("Tf"), [1.0, 1.0, 1.0]));
+        // d first, then Tr
+        let dissolve = m.dissolve.or_else(|| {
+            m.unknown_param.get("Tr")
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .map(|tr| 1.0 - tr)
+        }).unwrap_or(1.0).clamp(0.0, 1.0);
+        let reflection_sharpness = parse_f32(m.unknown_param.get("sharpness"), 60.0).clamp(0.0, 1000.0);
+        let optical_density = m.optical_density.unwrap_or(1.0).clamp(0.001, 10.0);
+        // Ns first, then Pr
+        let specular_exponent = m.shininess.or_else(|| {
+            m.unknown_param.get("Pr")
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .map(|pr| {
+                    (2.0 / (pr.max(0.0001) * pr.max(0.0001))) - 2.0
+                })
+            }).unwrap_or(10.0).clamp(0.0, 1000.0);
+        let metallic = parse_f32(m.unknown_param.get("Pm"), 0.0).clamp(0.0, 1.0);
+        let sheen = parse_f32(m.unknown_param.get("Ps"), 0.0).clamp(0.0, 1.0);
+        let clearcoat_thickness = parse_f32(m.unknown_param.get("Pc"), 0.0).clamp(0.0, 1.0);
+        let clearcoat_roughness = parse_f32(m.unknown_param.get("Pcr"), 0.0).clamp(0.0, 1.0);
+        let anisotropy = parse_f32(m.unknown_param.get("aniso"), 0.0).clamp(0.0, 1.0);
+        let anisotropy_rotation = parse_f32(m.unknown_param.get("anisor"), 0.0).clamp(0.0, 1.0);
+        
+        let illumination_model = u32::from(m.illumination_model.unwrap_or(2)).clamp(0, 10); 
+
+
 
         materials.push(model::Material::new(
             device,
             &m.name,
-            diffuse_texture,
-            normal_texture,
+            model::MaterialTextures::new(
+                diffuse_texture,
+                normal_texture,
+                specular_texture,
+                dissolve_texture,
+                ambient_texture,
+                roughness_texture,
+                metal_texture,
+            ),
             layout,
+            model::MaterialUniforms::new(
+                ambient_color,
+                diffuse_color,
+                specular_color,
+                emissive_color,
+                transmission_filter,
+                dissolve,
+                specular_exponent,
+                optical_density,
+                reflection_sharpness,
+                metallic,
+                sheen,
+                clearcoat_thickness,
+                clearcoat_roughness,
+                anisotropy,
+                anisotropy_rotation,
+                illumination_model,
+            )
         ));
     }
 
@@ -87,8 +225,8 @@ pub async fn load_model(
                         m.mesh.normals[i * 3 + 2],
                     ],
                     // calculated later
-                    tangent: [0.0; 3],
-                    bitangent: [0.0; 3]
+                    // tangent: [0.0; 3],
+                    // bitangent: [0.0; 3]
                 })
                 .collect::<Vec<_>>();
 
@@ -97,59 +235,59 @@ pub async fn load_model(
 
             // calculate tangents/bitangents
             // we use the triangles, so we loop in chunks of 3
-            for c in indices.chunks(3) {
-                let v0 = vertices[c[0] as usize];
-                let v1 = vertices[c[1] as usize];
-                let v2 = vertices[c[2] as usize];
+            // for c in indices.chunks(3) {
+            //     let v0 = vertices[c[0] as usize];
+            //     let v1 = vertices[c[1] as usize];
+            //     let v2 = vertices[c[2] as usize];
 
-                let pos0: cgmath::Vector3<_> = v0.position.into();
-                let pos1: cgmath::Vector3<_> = v1.position.into();
-                let pos2: cgmath::Vector3<_> = v2.position.into();
+            //     let pos0: cgmath::Vector3<_> = v0.position.into();
+            //     let pos1: cgmath::Vector3<_> = v1.position.into();
+            //     let pos2: cgmath::Vector3<_> = v2.position.into();
 
-                let uv0: cgmath::Vector2<_> = v0.tex_coords.into();
-                let uv1: cgmath::Vector2<_> = v1.tex_coords.into();
-                let uv2: cgmath::Vector2<_> = v2.tex_coords.into();
+            //     let uv0: cgmath::Vector2<_> = v0.tex_coords.into();
+            //     let uv1: cgmath::Vector2<_> = v1.tex_coords.into();
+            //     let uv2: cgmath::Vector2<_> = v2.tex_coords.into();
 
-                // calculate the edges of the triangle
-                let delta_pos1 = pos1 - pos0;
-                let delta_pos2 = pos2 - pos0;
+            //     // calculate the edges of the triangle
+            //     let delta_pos1 = pos1 - pos0;
+            //     let delta_pos2 = pos2 - pos0;
 
-                // this gives a direction to calculate the tangent/bitangent
-                let delta_uv1 = uv1 - uv0;
-                let delta_uv2 = uv2 - uv0;
+            //     // this gives a direction to calculate the tangent/bitangent
+            //     let delta_uv1 = uv1 - uv0;
+            //     let delta_uv2 = uv2 - uv0;
 
-                let r = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x);
-                let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
-                // flip the bitangent to enable right-handed normal maps with wgpu texture coordinate system
-                let bitangent = (delta_pos2 * delta_uv1.x - delta_pos1 * delta_uv2.x) * -r;
+            //     let r = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv1.y * delta_uv2.x);
+            //     let tangent = (delta_pos1 * delta_uv2.y - delta_pos2 * delta_uv1.y) * r;
+            //     // flip the bitangent to enable right-handed normal maps with wgpu texture coordinate system
+            //     let bitangent = (delta_pos2 * delta_uv1.x - delta_pos1 * delta_uv2.x) * -r;
 
-                // we use the same tangent/bitangent for each vertex in the triangle
-                vertices[c[0] as usize].tangent =
-                    (tangent + cgmath::Vector3::from(vertices[c[0] as usize].tangent)).into();
-                vertices[c[1] as usize].tangent =
-                    (tangent + cgmath::Vector3::from(vertices[c[1] as usize].tangent)).into();
-                vertices[c[2] as usize].tangent =
-                    (tangent + cgmath::Vector3::from(vertices[c[2] as usize].tangent)).into();
-                vertices[c[0] as usize].bitangent =
-                    (bitangent + cgmath::Vector3::from(vertices[c[0] as usize].bitangent)).into();
-                vertices[c[1] as usize].bitangent =
-                    (bitangent + cgmath::Vector3::from(vertices[c[1] as usize].bitangent)).into();
-                vertices[c[2] as usize].bitangent =
-                    (bitangent + cgmath::Vector3::from(vertices[c[2] as usize].bitangent)).into();
+            //     // we use the same tangent/bitangent for each vertex in the triangle
+            //     vertices[c[0] as usize].tangent =
+            //         (tangent + cgmath::Vector3::from(vertices[c[0] as usize].tangent)).into();
+            //     vertices[c[1] as usize].tangent =
+            //         (tangent + cgmath::Vector3::from(vertices[c[1] as usize].tangent)).into();
+            //     vertices[c[2] as usize].tangent =
+            //         (tangent + cgmath::Vector3::from(vertices[c[2] as usize].tangent)).into();
+            //     vertices[c[0] as usize].bitangent =
+            //         (bitangent + cgmath::Vector3::from(vertices[c[0] as usize].bitangent)).into();
+            //     vertices[c[1] as usize].bitangent =
+            //         (bitangent + cgmath::Vector3::from(vertices[c[1] as usize].bitangent)).into();
+            //     vertices[c[2] as usize].bitangent =
+            //         (bitangent + cgmath::Vector3::from(vertices[c[2] as usize].bitangent)).into();
             
-                // used to average the tangents/bitangents
-                triangles_included[c[0] as usize] += 1;
-                triangles_included[c[1] as usize] += 1;
-                triangles_included[c[2] as usize] += 1;
-            }
+            //     // used to average the tangents/bitangents
+            //     triangles_included[c[0] as usize] += 1;
+            //     triangles_included[c[1] as usize] += 1;
+            //     triangles_included[c[2] as usize] += 1;
+            // }
 
             // average the tangents/bitangents
-            for (i, n) in triangles_included.into_iter().enumerate() {
-                let denominator = 1.0 / n as f32;
-                let mut v = &mut vertices[i];
-                v.tangent = (cgmath::Vector3::from(v.tangent) * denominator).into();
-                v.bitangent = (cgmath::Vector3::from(v.bitangent) * denominator).into();
-            }
+            // for (i, n) in triangles_included.into_iter().enumerate() {
+            //     let denominator = 1.0 / n as f32;
+            //     let mut v = &mut vertices[i];
+            //     v.tangent = (cgmath::Vector3::from(v.tangent) * denominator).into();
+            //     v.bitangent = (cgmath::Vector3::from(v.bitangent) * denominator).into();
+            // }
 
             let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("{file_name:?} Vertex Buffer")),

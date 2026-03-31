@@ -18,7 +18,6 @@ use crate::window::Window;
 use crate::model::{DrawModel, Vertex, Model, DrawLight};
 use crate::camera::{Camera, CameraUniform, CameraController, Projection};
 
-const NUM_INSTANCES_PER_ROW: u32 = 100;
 // starting window size
 const WIDTH: usize = 640;
 const HEIGHT: usize = 480;
@@ -290,6 +289,10 @@ struct Application<'a> {
     light_render_pipeline: wgpu::RenderPipeline,
 
     obj_model: Model,
+    cube_model: Model,
+    cube_instance_buffer: wgpu::Buffer,
+    ground_model: Model,
+    ground_instance_buffer: wgpu::Buffer,
 
     debug: DebugInfo,
     window_active: bool,
@@ -441,6 +444,102 @@ impl Application<'_> {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // specular
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // dissolve
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // ambient
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // roughness
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // metal
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // material uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }
                 ],
                 label: Some("texture_bind_group_layout"),
             }
@@ -504,7 +603,8 @@ impl Application<'_> {
         );
         
         // instancing
-        const SPACE_BETWEEN: f32 = 3.0;
+        const SPACE_BETWEEN: f32 = 2.0;
+        const NUM_INSTANCES_PER_ROW: u32 = 1;
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
                 let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
@@ -532,15 +632,106 @@ impl Application<'_> {
         });
 
         log::warn!("load model");
-        let obj_model =
-            resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout)
-                .await
-                .unwrap();
+        let obj_model = resources::load_model(
+            "cannon/cannon.obj",
+            &device,
+            &queue,
+            &texture_bind_group_layout
+        ).await.unwrap();
 
+        let cube_model = resources::load_model(
+            "cube2/cube.obj",
+            &device,
+            &queue,
+            &texture_bind_group_layout
+        ).await.unwrap();
+        let cube_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cube-instance-buffer"),
+            contents: bytemuck::cast_slice(&[
+                    Instance {
+                        position: [2.0, 0.5, 2.0].into(),
+                        rotation: cgmath::Quaternion::one(),
+                    }.to_raw()
+                ]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+
+        let ground_vertices = [
+            model::ModelVertex { position: [-500.0, -0.5, -500.0], tex_coords: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+            model::ModelVertex { position: [ 500.0, -0.5, -500.0], tex_coords: [1000.0, 0.0], normal: [0.0, 1.0, 0.0] },
+            model::ModelVertex { position: [ 500.0, -0.5,  500.0], tex_coords: [1000.0, 1000.0], normal: [0.0, 1.0, 0.0] },
+            model::ModelVertex { position: [-500.0, -0.5,  500.0], tex_coords: [0.0, 1000.0], normal: [0.0, 1.0, 0.0] },
+        ];
+        let ground_indices: [u32; 6] = [0, 2, 1, 0, 3, 2];
+
+        let ground_v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_vertex_buffer"),
+            contents: bytemuck::cast_slice(&ground_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ground_i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_index_buffer"),
+            contents: bytemuck::cast_slice(&ground_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let ground_diffuse_texture = texture::Texture::from_color(
+            &device,
+            &queue,
+            [50, 50, 50, 255],
+            "ground_diffuse",
+            false,
+        ).unwrap();
+
+        let mut ground_material_textures = model::MaterialTextures::from_diffuse(
+            &device,
+            &queue,
+            ground_diffuse_texture,
+        ).unwrap();
+
+        ground_material_textures.roughness = texture::Texture::from_color(&device, &queue, [0, 0, 0, 255], "default_roughness", false).unwrap();
+
+        let mut ground_material_uniforms = model::MaterialUniforms::default();
+        ground_material_uniforms.specular_exponent = 100.0;
+        ground_material_uniforms.specular_color = [1.0, 1.0, 1.0];
+        let mut ground_material = model::Material::new(
+            &device,
+            "ground-material",
+            ground_material_textures,
+            &texture_bind_group_layout,
+            ground_material_uniforms,
+        );
+
+        let ground_model = model::Model {
+            meshes: vec![model::Mesh {
+                name: "ground".into(),
+                vertex_buffer: ground_v_buf,
+                index_buffer: ground_i_buf,
+                num_elements: 6,
+                material: 0, 
+            }],
+            materials: vec![ground_material],
+        };
+
+        let ground_instance = Instance {
+            position: [0.0, -0.1, 0.0].into(),
+            rotation: cgmath::Quaternion::one(),
+        };
+        let ground_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground-instance-buffer"),
+            contents: bytemuck::cast_slice(&[
+                    Instance {
+                        position: [0.0, -0.1, 0.0].into(),
+                        rotation: cgmath::Quaternion::one(),
+                    }.to_raw()
+                ]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
         // add lighting
         let light_uniform = LightUniform {
-            position: [2.0, 2.0, 2.0],
+            position: [2.0, 3.0, 2.0],
             _padding: 0,
             color: [1.0, 0.96, 0.89],
             _padding2: 0
@@ -662,6 +853,10 @@ impl Application<'_> {
             light_bind_group,
             light_render_pipeline,
             obj_model,
+            cube_model,
+            cube_instance_buffer,
+            ground_model,
+            ground_instance_buffer,
             debug: DebugInfo::new(),
             window_active: false,
         };
@@ -824,8 +1019,6 @@ impl Application<'_> {
         });
 
         // sets the render pipeline and buffers, and draw our frame
-        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        
         render_pass.set_pipeline(&self.light_render_pipeline);
         render_pass.draw_light_model(
             &self.obj_model,
@@ -834,6 +1027,24 @@ impl Application<'_> {
         );
         
         render_pass.set_pipeline(&self.render_pipeline);
+
+        render_pass.set_vertex_buffer(1, self.ground_instance_buffer.slice(..));
+        render_pass.draw_model_instanced(
+            &self.ground_model,
+            0..1,
+            &self.camera_bind_group,
+            &self.light_bind_group,
+        );
+
+        render_pass.set_vertex_buffer(1, self.cube_instance_buffer.slice(..));
+        render_pass.draw_model_instanced(
+            &self.cube_model,
+            0..1,
+            &self.camera_bind_group,
+            &self.light_bind_group,
+        );
+
+        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         render_pass.draw_model_instanced(
             &self.obj_model,
             0..self.instances.len() as u32,
