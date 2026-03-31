@@ -9,18 +9,16 @@ use cgmath::prelude::*;
 use std::time::{Duration, Instant};
 
 mod window;
+mod core;
 mod texture;
 mod model;
 mod resources;
 mod camera;
 
-use crate::window::Window;
+pub use crate::window::Window;
+use crate::core::GraphicsContext;
 use crate::model::{DrawModel, Vertex, Model, DrawLight};
 use crate::camera::{Camera, CameraUniform, CameraController, Projection};
-
-// starting window size
-const WIDTH: usize = 640;
-const HEIGHT: usize = 480;
 
 struct Instance {
     position: cgmath::Vector3<f32>,
@@ -241,29 +239,7 @@ fn create_render_pipeline(
 }
 
 struct Application<'a> {
-    // the minifb window object onscreen
-    window: Window,
-
-    // the drawable part of the window, like the "canvas"
-    surface: ManuallyDrop<wgpu::Surface<'a>>,
-
-    // how the pixels on the surface are stored in memory
-    surface_format: wgpu::TextureFormat,
-
-    // handle to the physical GPU hardware
-    adapter: wgpu::Adapter,
-
-    // the software interface connection to the GPU
-    // to send commands or create resources (buffers/textures/pipelines)
-    device: wgpu::Device,
-
-    // the channel to submit commands (like drawing instructions) for the GPU to execute
-    queue: wgpu::Queue,
-
-    // configuration for the surface, like width, height,
-    // surface_format, present_mode (vsync) etc.
-    // needs to be updated when anything changes (like resizing)
-    config: wgpu::SurfaceConfiguration,
+    pub gfx: GraphicsContext<'a>,
 
     // complete, pre-configured state object that defines how to draw
     // bundles: vertex/fragment shader, vertex data layout, type of primitive (tri),
@@ -298,111 +274,15 @@ struct Application<'a> {
     window_active: bool,
 }
 
-impl Drop for Application<'_> {
-    // the surface object is fundamentally linked to the window;
-    // the surface contains pointers to the OS level window.
-    // we NEED the surface to be dropped before the window, or crashes occur,
-    // so we define a manual drop method here to drop the surface first
-    fn drop(&mut self) {
-        unsafe {
-            ManuallyDrop::drop(&mut self.surface);
-        }
-    }
-}
-
 impl Application<'_> {
-    async fn new() -> Self {
-        // create the physical window
-        let mut window = Window::new(
-            "awesome window",
-            WIDTH,
-            HEIGHT,
-            WindowOptions {
-                resize: true,
-                ..Default::default()
-            },
-        )
-        .unwrap_or_else(|e| panic!("{}", e));
-        window.set_target_fps(0); // uncapped framerate
-
-        // the instance is a handle to the GPU
-        // BackendBit::PRIMARY -> Vulkan + Metal + DX12 + Browser WebGPU
-        log::warn!("wgpu setup");
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            flags: Default::default(),
-            memory_budget_thresholds: Default::default(),
-            backend_options: Default::default(),
-            display: Some(Box::new(window.get_display_wrapper())),
-        });
-
-        // mini_fb's window type isn't `Send` which is required for wgpu's `WindowHandle` trait
-        // so have to use the unsafe variant to create a surface directly from the window handle
-        // - the window handles are valid at this point
-        // - the window is guranteed to outlive the surface since we're ensuring so in `Application's` Drop impl
-        let surface = unsafe {
-            instance.create_surface_unsafe(
-                wgpu::SurfaceTargetUnsafe::from_window(&window.inner)
-                    .expect("Failed to create surface target."),
-            )
-        }.expect("Failed to create surface");
-
-        // get the handle to the physical GPU
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(), // HighPerformance, LowPower
-                compatible_surface: Some(&surface), // make sure the gpu use our surface
-                force_fallback_adapter: false,
-            })
-            .await.expect("Failed to find an appropriate adapter");
-        log::info!("Created wgpu adapter: {:?}", adapter.get_info());
-
-        // get a logical connection to the gpu
-        log::warn!("device and queue");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits:  wgpu::Limits::default(),
-                    memory_hints: Default::default(),
-                    trace: wgpu::Trace::Off,
-                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            })
-            .await
-            .expect("Failed to create device");
-
-        // get what the GPU is capable of (formats, vsync modes, etc.)
-        log::warn!("surface");
-        let surface_caps = surface.get_capabilities(&adapter);
-        // try to get sRGB format for consistent colors
-        let surface_format = surface_caps.formats.iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-        // let surface_format = surface_format.remove_srgb_suffix(); // not sure why the tutorial uses this
-
-        // different settings for the surface
-        let config = wgpu::SurfaceConfiguration {
-            // tell GPU that the primary use for this surface's textures
-            // is to be drawn into, like an attachment in a render pass
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT, 
-            format: surface_format,
-            width: window.get_size().0 as u32,
-            height: window.get_size().1 as u32,
-            // controls VSync; defaults to Fifo (standard VSync)
-            // present_mode: surface_caps.present_modes[0],
-            // unlocked FPS for benchmarking
-            present_mode: wgpu::PresentMode::Immediate,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
+    async fn new(window: Window) -> Self {
+        let gfx = GraphicsContext::new(window).await;
 
         // a bind group describes a set of resources and how they can be accessed by the shader
         // this is separate from the layout because it allows us to swap bind groups
         // on the fly given they share the same layout
         // each texture/sampler has to be added to a bind group
-        let texture_bind_group_layout = device.create_bind_group_layout(
+        let texture_bind_group_layout = gfx.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     // sampled texture at binding 0
@@ -551,8 +431,8 @@ impl Application<'_> {
             cgmath::Deg(-20.0)
         );
         let projection = Projection::new(
-            config.width,
-            config.height,
+            gfx.config.width,
+            gfx.config.height,
             cgmath::Deg(45.0),
             0.02,
             100.0
@@ -563,7 +443,7 @@ impl Application<'_> {
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera, &projection);
             
-        let camera_buffer = device.create_buffer_init(
+        let camera_buffer = gfx.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("camera_buffer"),
                 contents: bytemuck::cast_slice(&[camera_uniform]),
@@ -571,7 +451,7 @@ impl Application<'_> {
             }
         );
 
-        let camera_bind_group_layout = device.create_bind_group_layout(
+        let camera_bind_group_layout = gfx.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -591,7 +471,7 @@ impl Application<'_> {
             }
         );
  
-        let camera_bind_group = device.create_bind_group(
+        let camera_bind_group = gfx.device.create_bind_group(
             &wgpu::BindGroupDescriptor {
                 layout: &camera_bind_group_layout,
                 entries: &[wgpu::BindGroupEntry {
@@ -625,27 +505,26 @@ impl Application<'_> {
         }).collect::<Vec<_>>();
  
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("instance_buffer"),
             contents: bytemuck::cast_slice(&instance_data),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        log::warn!("load model");
         let obj_model = resources::load_model(
             "cannon/cannon.obj",
-            &device,
-            &queue,
+            &gfx.device,
+            &gfx.queue,
             &texture_bind_group_layout
         ).await.unwrap();
 
         let cube_model = resources::load_model(
             "cube2/cube.obj",
-            &device,
-            &queue,
+            &gfx.device,
+            &gfx.queue,
             &texture_bind_group_layout
         ).await.unwrap();
-        let cube_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let cube_instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("cube-instance-buffer"),
             contents: bytemuck::cast_slice(&[
                     Instance {
@@ -665,38 +544,38 @@ impl Application<'_> {
         ];
         let ground_indices: [u32; 6] = [0, 2, 1, 0, 3, 2];
 
-        let ground_v_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let ground_v_buf = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground_vertex_buffer"),
             contents: bytemuck::cast_slice(&ground_vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let ground_i_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let ground_i_buf = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground_index_buffer"),
             contents: bytemuck::cast_slice(&ground_indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
         let ground_diffuse_texture = texture::Texture::from_color(
-            &device,
-            &queue,
+            &gfx.device,
+            &gfx.queue,
             [50, 50, 50, 255],
             "ground_diffuse",
             false,
         ).unwrap();
 
         let mut ground_material_textures = model::MaterialTextures::from_diffuse(
-            &device,
-            &queue,
+            &gfx.device,
+            &gfx.queue,
             ground_diffuse_texture,
         ).unwrap();
 
-        ground_material_textures.roughness = texture::Texture::from_color(&device, &queue, [0, 0, 0, 255], "default_roughness", false).unwrap();
+        ground_material_textures.roughness = texture::Texture::from_color(&gfx.device, &gfx.queue, [0, 0, 0, 255], "default_roughness", false).unwrap();
 
         let mut ground_material_uniforms = model::MaterialUniforms::default();
         ground_material_uniforms.specular_exponent = 100.0;
         ground_material_uniforms.specular_color = [1.0, 1.0, 1.0];
         let mut ground_material = model::Material::new(
-            &device,
+            &gfx.device,
             "ground-material",
             ground_material_textures,
             &texture_bind_group_layout,
@@ -718,7 +597,7 @@ impl Application<'_> {
             position: [0.0, -0.1, 0.0].into(),
             rotation: cgmath::Quaternion::one(),
         };
-        let ground_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let ground_instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground-instance-buffer"),
             contents: bytemuck::cast_slice(&[
                     Instance {
@@ -738,13 +617,13 @@ impl Application<'_> {
         };
 
         // use COPY_DST to update light's position
-        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let light_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("light_buffer"),
             contents: bytemuck::cast_slice(&[light_uniform]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let light_bind_group_layout = device.create_bind_group_layout(
+        let light_bind_group_layout = gfx.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -760,7 +639,7 @@ impl Application<'_> {
             }
         );
  
-        let light_bind_group = device.create_bind_group(
+        let light_bind_group = gfx.device.create_bind_group(
             &wgpu::BindGroupDescriptor {
                 layout: &light_bind_group_layout,
                 entries: &[wgpu::BindGroupEntry {
@@ -772,12 +651,12 @@ impl Application<'_> {
         );
 
         // create our depth texture for correct z rendering
-        let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texture");
+        let depth_texture = texture::Texture::create_depth_texture(&gfx.device, &gfx.config, "depth_texture");
 
         // the pipeline layout defines the interface between the pipeline
         // and the external GPU resources (textures, uniforms, storage buffers)
         let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            gfx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("render_pipeline_layout"),
                 // a bind group is a way to group resources that a shader needs access to
                 // ex. a group for scene data, material-specific data
@@ -796,9 +675,9 @@ impl Application<'_> {
                 source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/shader.wgsl").into()),
             };
             create_render_pipeline(
-                &device,
+                &gfx.device,
                 &render_pipeline_layout,
-                config.format,
+                gfx.config.format,
                 Some(texture::Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc(), InstanceRaw::desc()],
                 shader,
@@ -807,7 +686,7 @@ impl Application<'_> {
         };
 
         let light_render_pipeline = {
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            let layout = gfx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("light_pipeline_layout"),
                 bind_group_layouts: &[
                     Some(&camera_bind_group_layout),
@@ -820,9 +699,9 @@ impl Application<'_> {
                 source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/light.wgsl").into()),
             };
             create_render_pipeline(
-                &device,
+                &gfx.device,
                 &layout,
-                config.format,
+                gfx.config.format,
                 Some(texture::Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc()],
                 shader,
@@ -831,13 +710,7 @@ impl Application<'_> {
         };
 
         let mut application = Application {
-            window,
-            surface: ManuallyDrop::new(surface),
-            surface_format,
-            adapter,
-            device,
-            queue,
-            config,
+            gfx,
             render_pipeline,
             camera,
             projection,
@@ -863,54 +736,35 @@ impl Application<'_> {
 
         // apply the config to the surface
         // tells GPU to create a swap chain (set of textures to draw to) with the w/h/format
-        application.configure_surface();
+        let (width, height) = application.gfx.window.get_size();
+        application.resize(width as u32, height as u32);
 
         application
     }
 
     pub fn window(&self) -> &Window {
-        &self.window
+        &self.gfx.window
     }
 
-    fn configure_surface(&mut self) {
-        // applies the settings stored in the config to the surface itself
-        // called at start and on window resize
+    fn resize(&mut self, width: u32, height: u32) {
+        // resize GPU surface
+        self.gfx.configure_surface(width, height);
 
-        // Swap Chain Process:
-        // modern rendering doesn't draw directly to the image on screen; instead, it uses two or three buffers:
-        // Front buffer - the texture the monitor is currently reading from
-        // Back buffer - a hidden texture where the application is drawing the next frame
-        // Mailbox buffer - an optional third buffer that stores the last fully completed frame
-
-        // the "swap" in swap chain happens when we want to update the texture the monitor is reading from;
-        // so it swaps the pointer to the buffer the monitor will read instead of doing a frame copy
-        // (the Back buffer becomes the Front buffer, and vice versa)
-
-        // when using VSync, only the first two buffers are used; this is because it allows the 
-        // swap to happen in sync with the refresh rate (VBlank period) to avoid tearing (half rendered frames)
-        // otherwise, the GPU keeps churning frames out in the Back buffer, and when a frame is complete
-        // it sends it to the Mailbox buffer, and when the monitor refreshes, it reads from the Mailbox buffer
-        // which is guarenteed to be a full frame, preventing tearing (but using more VRAM)
-
-        let (width, height) = self.window.get_size();
-        // only configure the surface if the dimensions are valid
-        if width == 0 || height == 0 {
-            return;
-        }
-        // set the new window sizes
-        self.config.width = width as u32;
-        self.config.height = height as u32;
-        self.projection.resize(width as u32, height as u32);
-        // reconfigure the surface
-        self.surface.configure(&self.device, &self.config);
         // recreate depth texture with new size
-        self.depth_texture = texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
-    }
+        self.depth_texture = texture::Texture::create_depth_texture(
+            &self.gfx.device,
+            &self.gfx.config,
+            "depth_texture"
+        );
+    
+        // update camera's aspect ratio
+        self.projection.resize(width as u32, height as u32);
+}
 
     fn update(&mut self, dt: Duration) {
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
-        self.queue.write_buffer(
+        self.gfx.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
@@ -923,7 +777,7 @@ impl Application<'_> {
                 cgmath::Deg(60.0 * dt.as_secs_f32())
             ) * old_position
         ).into();
-        self.queue.write_buffer(
+        self.gfx.queue.write_buffer(
             &self.light_buffer,
             0,
             bytemuck::cast_slice(&[self.light_uniform]),
@@ -937,11 +791,12 @@ impl Application<'_> {
         self.debug.draw_calls = 0;
         self.debug.rendered_tris = 0;
 
-        let frame = match self.surface.get_current_texture() {
+        let (width, height) = self.gfx.window.get_size();
+        let frame = match self.gfx.surface.get_current_texture() {
             // request a buffer/texture/frame from the swap chain
             wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
             wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
-                self.configure_surface();
+                self.resize(width as u32, height as u32);
                 surface_texture
             }
             wgpu::CurrentSurfaceTexture::Timeout
@@ -952,13 +807,13 @@ impl Application<'_> {
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 // window resized or something else made the swap chain obsolete
-                self.configure_surface();
+                self.resize(width as u32, height as u32);
                 return;
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 // swap chain was lost for a serious reason (like display driver reset)
-                log::error!("Swapchain has been lost.");
-                self.configure_surface();
+                log::error!("Swapchain has been lost!");
+                self.resize(width as u32, height as u32);
                 return;
             }
         };
@@ -971,8 +826,7 @@ impl Application<'_> {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // create the CommandEncoder, which records a list of all commands to be sent to the GPU
-        let mut encoder = self
-            .device
+        let mut encoder = self.gfx.device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("render_encoder"),
             });
@@ -1060,50 +914,50 @@ impl Application<'_> {
         // tell the encoder we are done recording and to package all commands into a command buffer
         let command_buffer = encoder.finish();
         // submit the command buffer with all commands to the Queue
-        self.queue.submit(Some(command_buffer));
+        self.gfx.queue.submit(Some(command_buffer));
         // tell the swap chain we're done drawing this frame, ready to be presented to the screen
         frame.present()
     }
 }
  
-pub fn run() {
+pub fn run(window: Window) {
     // init the application; since Application::new() is async, 
     // (requesting adaptor/device from OS takes time)
     // pollster lets us call it in our sync fn and wait here until it's done 
-    let mut application = pollster::block_on(Application::new());
+    let mut application = pollster::block_on(Application::new(window));
     let mut last_render_time = Instant::now();
 
     // main program loop
     loop {
         // processes events like key presses, mouse movements, close button, etc.
-        application.window.update();
+        application.gfx.window.update();
 
         // handle special keys
-        let keys = application.window.get_keys();
-        let mouse_pressed = application.window.get_mouse_down(MouseButton::Left);
+        let keys = application.gfx.window.get_keys();
+        let mouse_pressed = application.gfx.window.get_mouse_down(MouseButton::Left);
         if keys.contains(&Key::Backspace) { return }
 
         if (application.window_active &&
-            (keys.contains(&Key::Escape) || !application.window.is_active())) {
+            (keys.contains(&Key::Escape) || !application.gfx.window.is_active())) {
             // unlock mouse if hit esc or unfocus window
-            application.window.set_cursor_visibility(true);
+            application.gfx.window.set_cursor_visibility(true);
             application.window_active = false;
         }
         if (!application.window_active && mouse_pressed) {
             // lock mouse if clicked on
-            application.window.set_cursor_visibility(false);
+            application.gfx.window.set_cursor_visibility(false);
             application.window_active = true;
 
             // snap mouse immediately to center to camera doesn't jump
-            let (width, height) = application.window.get_size();
-            application.window.set_mouse_pos((width / 2) as f32, (height / 2) as f32);
+            let (width, height) = application.gfx.window.get_size();
+            application.gfx.window.set_mouse_pos((width / 2) as f32, (height / 2) as f32);
         }
         
         // handle infinite mouse movement
         let mut mouse_delta = (0.0, 0.0);
-        if application.window_active && application.window.is_active()
-            && let Some((x, y)) = application.window.get_mouse_pos(MouseMode::Pass) {
-                let (width, height) = application.window.get_size();
+        if application.window_active && application.gfx.window.is_active()
+            && let Some((x, y)) = application.gfx.window.get_mouse_pos(MouseMode::Pass) {
+                let (width, height) = application.gfx.window.get_size();
                 let center_x = (width / 2) as f32;
                 let center_y = (height / 2) as f32;
 
@@ -1113,12 +967,12 @@ pub fn run() {
                 // only update and snap is mouse actually moved
                 if dx != 0.0 || dy != 0.0 {
                     mouse_delta = (dx, dy);
-                    application.window.set_mouse_pos(center_x, center_y);
+                    application.gfx.window.set_mouse_pos(center_x, center_y);
                 }
         }
 
             // handle scroll wheel
-        let scroll_wheel_delta = application.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
+        let scroll_wheel_delta = application.gfx.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
 
         // handle inputs
         application.camera_controller.handle_keys(&keys);
@@ -1131,17 +985,18 @@ pub fn run() {
         last_render_time = now;
         application.update(dt);
 
-        if !application.window.is_open() {
+        if !application.gfx.window.is_open() {
             return; // exit if window is closed
         }
 
         application.draw_frame();
         application.debug.update();
         print!(
-            "\rFPS: {:.2} | Draw Calls: {:<3} | Tris: {:<4} | Total Frames Drawn: {:<6}",
+            // "\rFPS: {:.2} | Draw Calls: {:<3} | Tris: {:<4} | Total Frames Drawn: {:<6}",
+            "\rFPS: {:.2} | Total Frames: {:<6}",
             application.debug.fps,
-            application.debug.draw_calls,
-            application.debug.rendered_tris,
+            // application.debug.draw_calls,
+            // application.debug.rendered_tris,
             application.debug.total_frames,
         );
         let _ = std::io::stdout().flush();

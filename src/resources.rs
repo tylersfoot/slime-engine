@@ -300,7 +300,7 @@ pub async fn load_model(
                 usage: wgpu::BufferUsages::INDEX,
             });
 
-            log::info!("Mesh: {}", m.name);
+            log::info!("Loaded model: {}", m.name);
             model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,
