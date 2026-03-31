@@ -292,7 +292,6 @@ struct Application<'a> {
     obj_model: Model,
 
     debug: DebugInfo,
-
     window_active: bool,
 }
 
@@ -870,30 +869,28 @@ pub fn run() {
 
         // handle special keys
         let keys = application.window.get_keys();
+        let mouse_pressed = application.window.get_mouse_down(MouseButton::Left);
         if keys.contains(&Key::Backspace) { return }
-        if (keys.contains(&Key::Escape) && application.window_active) {
-            // unlock mouse
+
+        if (application.window_active &&
+            (keys.contains(&Key::Escape) || !application.window.is_active())) {
+            // unlock mouse if hit esc or unfocus window
             application.window.set_cursor_visibility(true);
             application.window_active = false;
         }
-
-        let mouse_pressed = application.window.get_mouse_down(MouseButton::Left);
-        if (mouse_pressed && !application.window_active) {
-            // lock mouse
+        if (!application.window_active && mouse_pressed) {
+            // lock mouse if clicked on
             application.window.set_cursor_visibility(false);
             application.window_active = true;
 
-            // snap immediatly to center to camera doesn't jump
+            // snap mouse immediately to center to camera doesn't jump
             let (width, height) = application.window.get_size();
             application.window.set_mouse_pos((width / 2) as f32, (height / 2) as f32);
         }
-
-        // handle scroll wheel
-        let scroll_wheel_delta = application.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
         
         // handle infinite mouse movement
         let mut mouse_delta = (0.0, 0.0);
-        if application.window_active
+        if application.window_active && application.window.is_active()
             && let Some((x, y)) = application.window.get_mouse_pos(MouseMode::Pass) {
                 let (width, height) = application.window.get_size();
                 let center_x = (width / 2) as f32;
@@ -908,6 +905,9 @@ pub fn run() {
                     application.window.set_mouse_pos(center_x, center_y);
                 }
         }
+
+            // handle scroll wheel
+        let scroll_wheel_delta = application.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
 
         // handle inputs
         application.camera_controller.handle_keys(&keys);
