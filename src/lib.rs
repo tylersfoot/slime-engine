@@ -16,6 +16,7 @@ mod texture;
 mod model;
 mod resources;
 mod camera;
+mod transform;
 
 pub use crate::window::Window;
 use crate::core::GraphicsContext;
@@ -141,9 +142,9 @@ impl Application<'_> {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        self.scene.resize(width, height);
         self.gfx.configure_surface(width, height);
         self.renderer.resize(&self.gfx);
-        self.scene.resize(width, height);
     }
 }
  

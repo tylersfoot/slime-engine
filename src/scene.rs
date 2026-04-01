@@ -4,6 +4,7 @@ use crate::camera::{Camera, CameraUniform, CameraController, Projection};
 use crate::model::{Instance, InstanceRaw, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelVertex};
 use crate::texture::{Texture};
 use crate::resources;
+use crate::transform::Transform;
 use cgmath::prelude::*;
 use wgpu::util::DeviceExt;
 
@@ -86,7 +87,9 @@ impl Scene {
                 };
 
                 Instance {
-                    position, rotation,
+                    transform: Transform::new()
+                        .with_position(position)
+                        .with_rotation(rotation)
                 }
             })
         }).collect::<Vec<_>>();
@@ -114,10 +117,7 @@ impl Scene {
         let cube_instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("cube-instance-buffer"),
             contents: bytemuck::cast_slice(&[
-                    Instance {
-                        position: [2.0, 0.5, 2.0].into(),
-                        rotation: cgmath::Quaternion::one(),
-                    }.to_raw()
+                    Instance::new(Transform::new().with_position([2.0, 0.5, 2.0])).to_raw(),
                 ]),
             usage: wgpu::BufferUsages::VERTEX,
         });
@@ -155,7 +155,13 @@ impl Scene {
             ground_diffuse_texture,
         ).unwrap();
 
-        ground_material_textures.roughness = Texture::from_color(&gfx.device, &gfx.queue, [0, 0, 0, 255], "default_roughness", false).unwrap();
+        ground_material_textures.roughness = Texture::from_color(
+            &gfx.device,
+            &gfx.queue,
+            [0, 0, 0, 255],
+            "default_roughness",
+            false
+        ).unwrap();
 
         let mut ground_material_uniforms = MaterialUniforms::default();
         ground_material_uniforms.specular_exponent = 100.0;
@@ -179,28 +185,23 @@ impl Scene {
             materials: vec![ground_material],
         };
 
-        let ground_instance = Instance {
-            position: [0.0, -0.1, 0.0].into(),
-            rotation: cgmath::Quaternion::one(),
-        };
+        let ground_instance = Instance::new(
+            Transform::new().with_position([0.0, -0.1, 0.0])
+        );
+    
         let ground_instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground-instance-buffer"),
             contents: bytemuck::cast_slice(&[
-                    Instance {
-                        position: [0.0, -0.1, 0.0].into(),
-                        rotation: cgmath::Quaternion::one(),
-                    }.to_raw()
+                    ground_instance.to_raw()
                 ]),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
         // add lighting
-        let light_uniform = LightUniform {
-            position: [2.0, 3.0, 2.0],
-            _padding: 0,
-            color: [1.0, 0.96, 0.89],
-            _padding2: 0
-        };
+        let light_uniform = LightUniform::new(
+            [2.0, 3.0, 2.0],
+            [1.0, 0.96, 0.89],
+        );
 
         // use COPY_DST to update light's position
         let light_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -279,4 +280,15 @@ pub struct LightUniform {
     _padding: u32,
     pub color: [f32; 3],
     _padding2: u32,
+}
+
+impl LightUniform {
+    pub fn new(position: [f32; 3], color: [f32; 3]) -> Self {
+        Self {
+            position,
+            _padding: 0,
+            color,
+            _padding2: 0,
+        }
+    }
 }

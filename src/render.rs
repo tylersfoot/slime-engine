@@ -282,7 +282,7 @@ impl Renderer {
 
     pub fn resize(&mut self, gfx: &GraphicsContext) {
         // when the window resizes, the renderer only needs to rebuild the depth texture
-        let depth_texture = texture::Texture::create_depth_texture(
+        self.depth_texture = texture::Texture::create_depth_texture(
             &gfx.device, &gfx.config, "depth_texture"
         );
     }
