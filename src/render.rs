@@ -1,8 +1,13 @@
 use crate::core::GraphicsContext;
+use crate::model::DrawLight;
+use crate::model::DrawModel;
 use crate::model::Vertex;
+use crate::scene::Scene;
 use crate::texture;
 use crate::model;
 
+
+// renderer represents "the how"
 pub struct Renderer {
     // pipeline: complete, pre-configured state object that defines how to draw
     // bundles: vertex/fragment shader, vertex data layout, type of primitive (tri),
@@ -235,7 +240,7 @@ impl Renderer {
                 &render_pipeline_layout,
                 gfx.config.format,
                 Some(texture::Texture::DEPTH_FORMAT),
-                &[model::ModelVertex::desc(), crate::InstanceRaw::desc()],
+                &[model::ModelVertex::desc(), crate::model::InstanceRaw::desc()],
                 shader,
                 Some("render_pipeline"),
             )
@@ -280,6 +285,103 @@ impl Renderer {
         let depth_texture = texture::Texture::create_depth_texture(
             &gfx.device, &gfx.config, "depth_texture"
         );
+    }
+
+    pub fn render(
+        &self,
+        gfx: &GraphicsContext,
+        scene: &Scene,
+        view: &wgpu::TextureView,
+    ) {
+        // draws the current frame
+
+        // create the CommandEncoder, which records a list of all commands to be sent to the GPU
+        let mut encoder = gfx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render_encoder"),
+        });
+
+        // begins a render pass, a block of drawing operations that target the same set of framebuffers/attachments
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("render_pass"),
+            // specifies where the final colors will be written
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    // attach the view of the frame texture
+                    view,
+                    resolve_target: None,
+                    // tells the GPU what to do with the attachment 
+                    // at the beginning (load) and end (store) of the pass
+                    ops: wgpu::Operations {
+                        // at the start, clear the texture to a background color
+                        load: wgpu::LoadOp::Clear(
+                            wgpu::Color {
+                                r: 0.1,
+                                g: 0.2,
+                                b: 0.3,
+                                a: 1.0,
+                            }
+                        ),
+                        // at the end, store the results into the texture
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })
+            ],
+            // attach depth texture to render objects in the right order
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            multiview_mask: None,
+            occlusion_query_set: None,
+        });
+
+        // draw light
+        render_pass.set_pipeline(&self.light_render_pipeline);
+        render_pass.draw_light_model(
+            &scene.obj_model,
+            &scene.camera_bind_group,
+            &scene.light_bind_group,
+        );
+
+        // draw scene objects
+        render_pass.set_pipeline(&self.render_pipeline);
+
+        render_pass.set_vertex_buffer(1, scene.ground_instance_buffer.slice(..));
+        render_pass.draw_model_instanced(
+            &scene.ground_model,
+            0..1,
+            &scene.camera_bind_group,
+            &scene.light_bind_group,
+        );
+
+        render_pass.set_vertex_buffer(1, scene.cube_instance_buffer.slice(..));
+        render_pass.draw_model_instanced(
+            &scene.cube_model,
+            0..1,
+            &scene.camera_bind_group,
+            &scene.light_bind_group,
+        );
+
+        render_pass.set_vertex_buffer(1, scene.obj_instance_buffer.slice(..));
+        render_pass.draw_model_instanced(
+            &scene.obj_model,
+            0..scene.obj_instances.len() as u32,
+            &scene.camera_bind_group,
+            &scene.light_bind_group,
+        );
+
+        // drop render pass manually
+        drop(render_pass);
+
+        // tell the encoder we are done recording and to package all commands into a command buffer
+        // submit the command buffer with all commands to the queue
+        gfx.queue.submit(Some(encoder.finish()));
     }
 }
 
