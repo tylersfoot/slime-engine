@@ -132,9 +132,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let roughness_map = textureSample(roughness_texture, roughness_sampler, in.tex_coords);
 
     // checkered ground
-    let grid = floor(in.tex_coords);
+    let grid = floor(in.world_position.xz);
     let checker = (i32(grid.x) + i32(grid.y)) % 2;
-    if (in.world_position.y < -0.49) {
+    if (in.world_position.y < -0.395) {
         if (checker == 0) {
             object_color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
         } else {

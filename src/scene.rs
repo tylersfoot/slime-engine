@@ -1,16 +1,20 @@
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
 use crate::camera::{Camera, CameraUniform, CameraController, Projection};
-use crate::model::{Instance, InstanceRaw, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelVertex};
+use crate::model::{ModelAsset, Instance, InstanceRaw, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelVertex};
 use crate::texture::{Texture};
 use crate::resources;
 use crate::transform::Transform;
-use cgmath::prelude::*;
+use crate::node::Node;
+use cgmath::{Matrix3, prelude::*};
 use wgpu::util::DeviceExt;
 
 
 // scene represents "the what"
 pub struct Scene {
+    pub nodes: Vec<Node>,
+    pub assets: Vec<ModelAsset>,
+
     pub camera: Camera,
     pub projection: Projection,
     pub camera_controller: CameraController,
@@ -21,19 +25,14 @@ pub struct Scene {
     pub light_uniform: LightUniform,
     pub light_buffer: wgpu::Buffer,
     pub light_bind_group: wgpu::BindGroup,
-
-    pub obj_model: Model,
-    pub obj_instances: Vec<Instance>,
-    pub obj_instance_buffer: wgpu::Buffer,
-    pub cube_model: Model,
-    pub cube_instance_buffer: wgpu::Buffer,
-    pub ground_model: Model,
-    pub ground_instance_buffer: wgpu::Buffer,
 }
 
 impl Scene {
     pub async fn new(gfx: &GraphicsContext<'_>, renderer: &Renderer) -> Self {
-       let camera = Camera::new(
+        let nodes = Vec::new();
+        let assets = Vec::new();
+
+        let camera = Camera::new(
             (0.0, 5.0, 10.0),
             cgmath::Deg(-90.0),
             cgmath::Deg(-20.0)
@@ -69,133 +68,6 @@ impl Scene {
                 label: Some("camera_bind_group"),
             }
         );
-        
-        // instancing
-        const SPACE_BETWEEN: f32 = 2.0;
-        const NUM_INSTANCES_PER_ROW: u32 = 1;
-        let obj_instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
-            (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-
-                let position = cgmath::Vector3 { x, y: 0.0, z };
-
-                let rotation = if position.is_zero() {
-                    cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0))
-                } else {
-                    cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
-                };
-
-                Instance {
-                    transform: Transform::new()
-                        .with_position(position)
-                        .with_rotation(rotation)
-                }
-            })
-        }).collect::<Vec<_>>();
- 
-        let obj_instance_data = obj_instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let obj_instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("instance_buffer"),
-            contents: bytemuck::cast_slice(&obj_instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let obj_model = resources::load_model(
-            "cannon/cannon.obj",
-            &gfx.device,
-            &gfx.queue,
-            &renderer.texture_bind_group_layout
-        ).await.unwrap();
-
-        let cube_model = resources::load_model(
-            "cube2/cube.obj",
-            &gfx.device,
-            &gfx.queue,
-            &renderer.texture_bind_group_layout
-        ).await.unwrap();
-        let cube_instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("cube-instance-buffer"),
-            contents: bytemuck::cast_slice(&[
-                    Instance::new(Transform::new().with_position([2.0, 0.5, 2.0])).to_raw(),
-                ]),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let ground_vertices = [
-            ModelVertex { position: [-500.0, -0.5, -500.0], tex_coords: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
-            ModelVertex { position: [ 500.0, -0.5, -500.0], tex_coords: [1000.0, 0.0], normal: [0.0, 1.0, 0.0] },
-            ModelVertex { position: [ 500.0, -0.5,  500.0], tex_coords: [1000.0, 1000.0], normal: [0.0, 1.0, 0.0] },
-            ModelVertex { position: [-500.0, -0.5,  500.0], tex_coords: [0.0, 1000.0], normal: [0.0, 1.0, 0.0] },
-        ];
-        let ground_indices: [u32; 6] = [0, 2, 1, 0, 3, 2];
-
-        let ground_v_buf = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ground_vertex_buffer"),
-            contents: bytemuck::cast_slice(&ground_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let ground_i_buf = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ground_index_buffer"),
-            contents: bytemuck::cast_slice(&ground_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let ground_diffuse_texture = Texture::from_color(
-            &gfx.device,
-            &gfx.queue,
-            [50, 50, 50, 255],
-            "ground_diffuse",
-            false,
-        ).unwrap();
-
-        let mut ground_material_textures = MaterialTextures::from_diffuse(
-            &gfx.device,
-            &gfx.queue,
-            ground_diffuse_texture,
-        ).unwrap();
-
-        ground_material_textures.roughness = Texture::from_color(
-            &gfx.device,
-            &gfx.queue,
-            [0, 0, 0, 255],
-            "default_roughness",
-            false
-        ).unwrap();
-
-        let mut ground_material_uniforms = MaterialUniforms::default();
-        ground_material_uniforms.specular_exponent = 100.0;
-        ground_material_uniforms.specular_color = [1.0, 1.0, 1.0];
-        let mut ground_material = Material::new(
-            &gfx.device,
-            "ground-material",
-            ground_material_textures,
-            &renderer.texture_bind_group_layout,
-            ground_material_uniforms,
-        );
-
-        let ground_model = Model {
-            meshes: vec![Mesh {
-                name: "ground".into(),
-                vertex_buffer: ground_v_buf,
-                index_buffer: ground_i_buf,
-                num_elements: 6,
-                material: 0, 
-            }],
-            materials: vec![ground_material],
-        };
-
-        let ground_instance = Instance::new(
-            Transform::new().with_position([0.0, -0.1, 0.0])
-        );
-    
-        let ground_instance_buffer = gfx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ground-instance-buffer"),
-            contents: bytemuck::cast_slice(&[
-                    ground_instance.to_raw()
-                ]),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
 
         // add lighting
         let light_uniform = LightUniform::new(
@@ -222,6 +94,8 @@ impl Scene {
         );
 
         Self {
+            nodes,
+            assets,
             camera,
             projection,
             camera_controller,
@@ -231,14 +105,38 @@ impl Scene {
             light_uniform,
             light_buffer,
             light_bind_group,
-            obj_model,
-            obj_instances,
-            obj_instance_buffer,
-            cube_model,
-            cube_instance_buffer,
-            ground_model,
-            ground_instance_buffer,
         }
+    }
+
+    // loads .obj file from disk, creates buffers, returns ID handle
+    pub async fn load_model(
+        &mut self,
+        file_path: &str,
+        gfx: &GraphicsContext<'_>,
+        renderer: &Renderer
+    ) -> usize {
+        // load raw mesh data
+        let model = resources::load_model(
+            file_path,
+            &gfx.device,
+            &gfx.queue,
+            &renderer.texture_bind_group_layout
+        ).await.unwrap();
+
+        // wrap in asset container, creating empty instance buffer
+        let asset = ModelAsset::new(&gfx.device, model);
+
+        let id = self.assets.len();
+        self.assets.push(asset);
+        id
+    }
+
+    // spawns a node into the world, returns ID handle
+    pub fn spawn_node(&mut self, model_id: Option<usize>, transform: Transform) -> usize {
+        let node_id = self.nodes.len();
+        let node = Node::new(model_id).with_transform(transform);
+        self.nodes.push(node);
+        node_id
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -269,6 +167,48 @@ impl Scene {
             0,
             bytemuck::cast_slice(&[self.light_uniform]),
         );
+
+
+        // process nodes and instancing
+        for asset in &mut self.assets {
+            asset.instance_count = 0;
+        }
+
+        // create temporary buckets to hold the raw GPU data for each model
+        let mut instance_data = vec![Vec::new(); self.assets.len()];
+
+        // loop through the node tree and build transforms
+        for node in &mut self.nodes {
+            // calculate absolute world position
+            // TODO: add parent/child math
+            node.global_transform = node.transform.calc_matrix();
+
+            // if the node has a model, convert it to bytes and bucket it
+            if let Some(model_id) = node.model_id {
+                let raw = InstanceRaw {
+                    model: node.global_transform.into(),
+                    normal: Matrix3::from(node.transform.rotation).into(),
+                };
+                instance_data[model_id].push(raw);
+                self.assets[model_id].instance_count += 1;
+            }
+        }
+
+        // send the buckets to the wgpu buffers
+        for (i, asset) in self.assets.iter_mut().enumerate() {
+            if asset.instance_count > 0 {
+                // safeguard for now
+                assert!(
+                    asset.instance_count <= asset.capacity,
+                    "Exceeded instance capacity for model {}, max is {}", i, asset.capacity
+                );
+
+                queue.write_buffer(
+                    &asset.instance_buffer,
+                    0,
+                    bytemuck::cast_slice(&instance_data[i]));
+            }
+        }
     }
 }
 

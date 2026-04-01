@@ -17,11 +17,13 @@ mod model;
 mod resources;
 mod camera;
 mod transform;
+mod node;
 
 pub use crate::window::Window;
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
 use crate::scene::Scene;
+use crate::transform::Transform;
 
 // a struct to hold real-time debug information
 struct DebugInfo {
@@ -73,8 +75,49 @@ impl Application<'_> {
         // build the renderer (pipelines, layouts)
         let renderer = Renderer::new(&gfx);
 
-        // build the scene (camera, lights, models)
-        let scene = Scene::new(&gfx, &renderer).await;
+        // build the scene (for camera, lights, models)
+        let mut scene = Scene::new(&gfx, &renderer).await;
+
+
+        // load/spawn hardcoded assets for now
+
+        let cannon_model_id = scene.load_model("cannon/cannon.obj", &gfx, &renderer).await;
+        let cube_model_id = scene.load_model("cube2/cube.obj", &gfx, &renderer).await;
+        let unit_cube_model_id = scene.load_model("unit_cube.obj", &gfx, &renderer).await;
+
+        const SPACE_BETWEEN: f32 = 2.0;
+        const NUM_INSTANCES_PER_ROW: u32 = 1;
+        for z in 0..NUM_INSTANCES_PER_ROW {
+            for x in 0..NUM_INSTANCES_PER_ROW {
+                let x_pos = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+                let z_pos = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+
+                let position = cgmath::Vector3::new(x_pos, 0.0, z_pos);
+
+                let rotation = if position.is_zero() {
+                    cgmath::Quaternion::one()
+                } else {
+                    cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
+                };
+
+                scene.spawn_node(
+                    Some(cannon_model_id),
+                    Transform::new().with_position(position).with_rotation(rotation)
+                );
+            }
+        }
+
+        scene.spawn_node(
+            Some(cube_model_id),
+            Transform::new().with_position([2.0, 0.5, 2.0])
+        );
+
+        scene.spawn_node(
+            Some(unit_cube_model_id),
+            Transform::new()
+                .with_position([0.0, -0.5, 0.0])
+                .with_scale([500.0, 0.1, 500.0])
+        );
 
         let mut application = Application {
             gfx,

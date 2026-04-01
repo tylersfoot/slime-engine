@@ -344,38 +344,27 @@ impl Renderer {
         // draw light
         render_pass.set_pipeline(&self.light_render_pipeline);
         render_pass.draw_light_model(
-            &scene.obj_model,
+            &scene.assets[1].model, // TODO: dont use first object lol
             &scene.camera_bind_group,
             &scene.light_bind_group,
         );
 
         // draw scene objects
         render_pass.set_pipeline(&self.render_pipeline);
+        for asset in &scene.assets {
+            if asset.instance_count > 0 {
+                // bind specific buffer for this model
+                render_pass.set_vertex_buffer(1, asset.instance_buffer.slice(..));
 
-        render_pass.set_vertex_buffer(1, scene.ground_instance_buffer.slice(..));
-        render_pass.draw_model_instanced(
-            &scene.ground_model,
-            0..1,
-            &scene.camera_bind_group,
-            &scene.light_bind_group,
-        );
-
-        render_pass.set_vertex_buffer(1, scene.cube_instance_buffer.slice(..));
-        render_pass.draw_model_instanced(
-            &scene.cube_model,
-            0..1,
-            &scene.camera_bind_group,
-            &scene.light_bind_group,
-        );
-
-        render_pass.set_vertex_buffer(1, scene.obj_instance_buffer.slice(..));
-        render_pass.draw_model_instanced(
-            &scene.obj_model,
-            0..scene.obj_instances.len() as u32,
-            &scene.camera_bind_group,
-            &scene.light_bind_group,
-        );
-
+                // draw all instances
+                render_pass.draw_model_instanced(
+                    &asset.model,
+                    0..asset.instance_count,
+                    &scene.camera_bind_group,
+                    &scene.light_bind_group,
+                );
+            }
+        }
         // drop render pass manually
         drop(render_pass);
 

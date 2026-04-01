@@ -442,6 +442,42 @@ pub struct Model {
     pub materials: Vec<Material>,
 }
 
+// represents a loaded 3D asset + buffer to draw instances
+pub struct ModelAsset {
+    pub model: Model,
+    // the buffer holding the InstanceRaw data for the model
+    pub instance_buffer: wgpu::Buffer,
+    // how many nodes are currently using this model
+    pub instance_count: u32,
+    // how many instances the buffer can currently hold
+    pub capacity: u32,
+}
+
+impl ModelAsset {
+    pub fn new(device: &wgpu::Device, model: Model) -> Self {
+        // allocate for 100 instances to start
+        // TODO: resize when count > capacity
+        let capacity = 100;
+        let instance_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("model_instancce_buffer"),
+                size: (std::mem::size_of::<InstanceRaw>() * capacity) as wgpu::BufferAddress,
+                // COPY_DST so we can write to the buffer every frame
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        );
+
+        Self {
+            model,
+            instance_buffer,
+            instance_count: 0,
+            capacity: capacity as u32,
+        }
+
+    }
+}
+
 pub trait DrawModel<'a> {
     fn draw_mesh(
         &mut self,
