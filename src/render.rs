@@ -344,7 +344,7 @@ impl Renderer {
         // draw light
         render_pass.set_pipeline(&self.light_render_pipeline);
         render_pass.draw_light_model(
-            &scene.assets[1].model, // TODO: dont use first object lol
+            &scene.assets[0].model, // TODO: dont use first object lol
             &scene.camera_bind_group,
             &scene.light_bind_group,
         );

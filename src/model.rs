@@ -215,8 +215,10 @@ impl MaterialUniforms {
             _padding: [0.0; 2],
         }
     }
-    
-    pub fn default() -> Self {
+}
+
+impl Default for MaterialUniforms {
+    fn default() -> Self {
         // init with defaults, can edit individual values after
         Self {
             ambient_color: [1.0, 1.0, 1.0],
@@ -455,9 +457,9 @@ pub struct ModelAsset {
 
 impl ModelAsset {
     pub fn new(device: &wgpu::Device, model: Model) -> Self {
-        // allocate for 100 instances to start
+        // allocate for 200 instances to start
         // TODO: resize when count > capacity
-        let capacity = 100;
+        let capacity = 200;
         let instance_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("model_instancce_buffer"),

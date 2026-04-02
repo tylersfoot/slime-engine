@@ -1,5 +1,11 @@
 use crate::transform::Transform;
 use cgmath::{Matrix4};
+use slotmap::new_key_type;
+
+// generates unique ID keys for nodes
+new_key_type! {
+    pub struct NodeId;
+}
 
 pub struct Node {
     // local transform relative to parent
@@ -9,9 +15,9 @@ pub struct Node {
     // optional model ID to draw
     pub model_id: Option<usize>,
     // optional index of the parent node
-    pub parent: Option<usize>,
+    pub parent: Option<NodeId>,
     // indices of child nodes
-    pub children: Vec<usize>,
+    pub children: Vec<NodeId>,
 }
 
 impl Node {

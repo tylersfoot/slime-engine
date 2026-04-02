@@ -132,18 +132,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let roughness_map = textureSample(roughness_texture, roughness_sampler, in.tex_coords);
 
     // checkered ground
-    let grid = floor(in.world_position.xz);
-    let checker = (i32(grid.x) + i32(grid.y)) % 2;
-    if (in.world_position.y < -0.395) {
-        if (checker == 0) {
-            object_color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
-        } else {
-            object_color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
-        }
-    } else {
-        let texture_color = textureSample(diffuse_texture, diffuse_sampler, in.tex_coords);
-        object_color = texture_color * vec4<f32>(material.diffuse_color, 1.0);
-    }
+    // let grid = floor(in.world_position.xz);
+    // let checker = (i32(grid.x) + i32(grid.y)) % 2;
+    // if (in.world_position.y < -0.395) {
+    //     if (checker == 0) {
+    //         object_color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
+    //     } else {
+    //         object_color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
+    //     }
+    // } else {
+    //     let texture_color = textureSample(diffuse_texture, diffuse_sampler, in.tex_coords);
+    //     object_color = texture_color * vec4<f32>(material.diffuse_color, 1.0);
+    // }
+    let texture_color = textureSample(diffuse_texture, diffuse_sampler, in.tex_coords);
+    object_color = texture_color * vec4<f32>(material.diffuse_color, 1.0);
+    
 
     // normalized vectors (world space)
     let light_vector: vec3<f32> = normalize(light.position - in.world_position);

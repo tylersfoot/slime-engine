@@ -67,6 +67,12 @@ impl CameraUniform {
         self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
     }
 }
+
+impl Default for CameraUniform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
  
 pub struct CameraController {
     amount_left: f32,

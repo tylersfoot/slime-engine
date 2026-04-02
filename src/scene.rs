@@ -5,14 +5,15 @@ use crate::model::{ModelAsset, Instance, InstanceRaw, Material, MaterialTextures
 use crate::texture::{Texture};
 use crate::resources;
 use crate::transform::Transform;
-use crate::node::Node;
+use crate::node::{Node, NodeId};
 use cgmath::{Matrix3, prelude::*};
 use wgpu::util::DeviceExt;
+use slotmap::SlotMap;
 
 
 // scene represents "the what"
 pub struct Scene {
-    pub nodes: Vec<Node>,
+    pub nodes: SlotMap<NodeId, Node>,
     pub assets: Vec<ModelAsset>,
 
     pub camera: Camera,
@@ -29,7 +30,7 @@ pub struct Scene {
 
 impl Scene {
     pub async fn new(gfx: &GraphicsContext<'_>, renderer: &Renderer) -> Self {
-        let nodes = Vec::new();
+        let nodes = SlotMap::with_key();
         let assets = Vec::new();
 
         let camera = Camera::new(
@@ -132,11 +133,10 @@ impl Scene {
     }
 
     // spawns a node into the world, returns ID handle
-    pub fn spawn_node(&mut self, model_id: Option<usize>, transform: Transform) -> usize {
+    pub fn spawn_node(&mut self, model_id: Option<usize>, transform: Transform) -> NodeId {
         let node_id = self.nodes.len();
         let node = Node::new(model_id).with_transform(transform);
-        self.nodes.push(node);
-        node_id
+        self.nodes.insert(node)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -178,7 +178,7 @@ impl Scene {
         let mut instance_data = vec![Vec::new(); self.assets.len()];
 
         // loop through the node tree and build transforms
-        for node in &mut self.nodes {
+        for (_, node) in self.nodes.iter_mut() {
             // calculate absolute world position
             // TODO: add parent/child math
             node.global_transform = node.transform.calc_matrix();

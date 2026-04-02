@@ -8,22 +8,22 @@ pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
 use cgmath::prelude::*;
 use std::time::{Duration, Instant};
 
-mod window;
-mod core;
-mod render;
-mod scene;
-mod texture;
-mod model;
-mod resources;
-mod camera;
-mod transform;
-mod node;
+pub mod window;
+pub mod core;
+pub mod render;
+pub mod scene;
+pub mod texture;
+pub mod model;
+pub mod resources;
+pub mod camera;
+pub mod transform;
+pub mod node;
 
-pub use crate::window::Window;
+use crate::window::Window;
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
 use crate::scene::Scene;
-pub use crate::transform::Transform;
+use crate::transform::Transform;
 
 // a struct to hold real-time debug information
 struct DebugInfo {
