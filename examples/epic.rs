@@ -31,9 +31,9 @@ impl App for EpicGame {
         self.camera = Some(camera);
 
         let camera2 = engine.scene.spawn_camera(
-            [50.0, 20.0, 50.0],
-            180.0,
-            -45.0
+            [0.0, 20.0, 0.0],
+            -90.0,
+            -90.0
         );
         self.camera2 = Some(camera2);
 
@@ -117,7 +117,7 @@ impl App for EpicGame {
             Some(crazycorn_model_id),
             Transform::new()
                 .with_position([30.0, 0.0, 0.0])
-                .with_scale([0.05, 0.05, 0.05])
+                .with_scale([0.02, 0.02, 0.02])
         );
         self.crazycorn_id = Some(crazycorn_id);
 
@@ -149,29 +149,30 @@ impl App for EpicGame {
         // slowly spin the floating platform
         if let Some(node_id) = self.floating_platform_id
             && let Some(node) = engine.scene.nodes.get_mut(node_id) {
-            let spin = Quaternion::from_angle_x(Rad(30.0_f32.to_radians() * delta))
-                * Quaternion::from_angle_y(Rad(100.0_f32.to_radians() * delta))
-                * Quaternion::from_angle_z(Rad(60.0_f32.to_radians() * delta));   
+            let spin = Quaternion::from_angle_x(Rad(7.0_f32.to_radians() * delta))
+                * Quaternion::from_angle_y(Rad(10.0_f32.to_radians() * delta))
+                * Quaternion::from_angle_z(Rad(5.0_f32.to_radians() * delta));   
             node.transform.rotation = node.transform.rotation * spin;
         }
 
         if let Some(node_id) = self.crazycorn_id
             && let Some(node) = engine.scene.nodes.get_mut(node_id) {
-            let spin = Quaternion::from_angle_x(Rad(30.0_f32.to_radians() * delta))
-                * Quaternion::from_angle_y(Rad(100.0_f32.to_radians() * delta))
-                * Quaternion::from_angle_z(Rad(60.0_f32.to_radians() * delta));
+            let scale = 0.01;
+            let spin = Quaternion::from_angle_x(Rad((60.0_f32).to_radians() * delta))
+                * Quaternion::from_angle_y(Rad(200.0_f32.to_radians() * delta))
+                * Quaternion::from_angle_z(Rad(120.0_f32.to_radians() * delta));
             let new_rotation = node.transform.rotation * spin;
 
             node.transform = Transform::new()
                 .with_position([
-                    30.0,
-                    5.0 + (self.time_passed * 4.0).sin() * 5.0,
+                    5.0,
+                    5.0 + (self.time_passed * 4.0).sin() * scale * 5.0,
                     0.0
                 ])
                 .with_scale([
-                    0.05 + (self.time_passed * 3.0).sin() * 0.01,
-                    0.05 + (self.time_passed * 3.0).sin() * 0.01,
-                    0.05 + (self.time_passed * 3.0).sin() * 0.01
+                    scale + (self.time_passed * 3.0).sin() * (scale/10.0),
+                    scale + (self.time_passed * 3.0).sin() * (scale/10.0),
+                    scale + (self.time_passed * 3.0).sin() * (scale/10.0)
                 ])
                 .with_rotation(new_rotation);
         }

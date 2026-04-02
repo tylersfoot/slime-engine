@@ -159,6 +159,29 @@ impl Scene {
         }
     }
 
+    pub fn get_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
+        // recursively calculates the world transform 
+        // of a node by walking up the parent chain
+        let mut transform = cgmath::Matrix4::identity();
+
+        if let Some(node) = self.nodes.get(node_id) {
+            // get this node's local matrix
+            transform = node.transform.calc_matrix();
+            let mut current_parent = node.parent;
+
+            // loop up the heirarchy, multiplying transforms
+            while let Some(parent_id) = current_parent {
+                if let Some(parent_node) = self.nodes.get(parent_id) {
+                    transform = parent_node.transform.calc_matrix()  * transform;
+                    current_parent = parent_node.parent;
+                } else {
+                    break; // parent not found
+                }
+            }
+        }
+        transform
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.window_width = width;
         self.window_height = height;
@@ -197,7 +220,6 @@ impl Scene {
             bytemuck::cast_slice(&[self.light_uniform]),
         );
 
-
         // process nodes and instancing
         for asset in &mut self.assets {
             asset.instance_count = 0;
@@ -206,11 +228,16 @@ impl Scene {
         // create temporary buckets to hold the raw GPU data for each model
         let mut instance_data = vec![Vec::new(); self.assets.len()];
 
-        // loop through the node tree and build transforms
-        for (_, node) in self.nodes.iter_mut() {
-            // calculate absolute world position
-            // TODO: add parent/child math
-            node.global_transform = node.transform.calc_matrix();
+        // calculate all global transforms first
+        let mut global_transforms = Vec::with_capacity(self.nodes.len());
+        for (id, _) in self.nodes.iter() {
+            global_transforms.push((id, self.get_global_transform(id)));
+        }
+
+        // apply global transforms to nodes
+        for (id, global_matrix) in global_transforms {
+            let node = self.nodes.get_mut(id).unwrap();
+            node.global_transform = global_matrix;
 
             // if the node has a model, convert it to bytes and bucket it
             if let Some(model_id) = node.model_id {
@@ -235,7 +262,8 @@ impl Scene {
                 queue.write_buffer(
                     &asset.instance_buffer,
                     0,
-                    bytemuck::cast_slice(&instance_data[i]));
+                    bytemuck::cast_slice(&instance_data[i])
+                );
             }
         }
     }
