@@ -1,5 +1,7 @@
 use std::io::{BufReader, Cursor};
+use std::path::Path;
 use wgpu::util::DeviceExt;
+use anyhow::{Context, Result};
 
 use crate::{model, texture};
 
@@ -26,16 +28,16 @@ fn clamp_color(c: [f32; 3]) -> [f32; 3] {
     c.map(|x| x.clamp(0.0, 1.0))
 }
 
-pub fn load_string(file_name: &str) -> anyhow::Result<String> {
-    let path = std::path::Path::new(env!("OUT_DIR"))
+pub fn load_string(file_name: &str) -> Result<String> {
+    let path = Path::new(env!("OUT_DIR"))
         .join("res")
         .join(file_name);
     let txt = std::fs::read_to_string(path)?;
     Ok(txt)
 }
 
-pub fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
-    let path = std::path::Path::new(env!("OUT_DIR"))
+pub fn load_binary(file_name: &str) -> Result<Vec<u8>> {
+    let path = Path::new(env!("OUT_DIR"))
         .join("res")
         .join(file_name);
     let data = std::fs::read(path)?;
@@ -47,7 +49,7 @@ pub fn load_texture(
     is_normal_map: bool,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-) -> anyhow::Result<texture::Texture> {
+) -> Result<texture::Texture> {
     let data = load_binary(file_name)?;
     texture::Texture::from_bytes(device, queue, &data, file_name, is_normal_map)
 }
@@ -57,14 +59,14 @@ pub async fn load_model(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
-) -> anyhow::Result<model::Model> {
+) -> Result<model::Model> {
     let obj_text = load_string(file_name)?;
     let obj_cursor = Cursor::new(obj_text);
     let mut obj_reader = BufReader::new(obj_cursor);
 
     // folder the .obj file is in
-    let parent_dir = std::path::Path::new(file_name).parent()
-        .unwrap_or(std::path::Path::new(""));
+    let parent_dir = Path::new(file_name).parent()
+        .unwrap_or(Path::new(""));
 
     let (models, obj_materials) = tobj::load_obj_buf(
         &mut obj_reader,
@@ -74,69 +76,76 @@ pub async fn load_model(
             ..Default::default()
         },
         |p| {
-            let mat_text = load_string(parent_dir.join(p).to_str().unwrap()).unwrap();
-            tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(mat_text)))
+            let mtl_path = parent_dir.join(p);
+
+            match load_string(&mtl_path.to_string_lossy()) {
+                Ok(mat_text) => {
+                    tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(mat_text)))
+                },
+                Err(e) => {
+                    log::warn!("Missing or invalid .mtl file at {:?}: {}. Using default materials", mtl_path, e);
+                    tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(String::new())))
+                }
+            }
         },
     )?;
 
     let mut materials = Vec::new();
-    for m in obj_materials? {
-        // load textures, and use fallbacks if missing
-        // diffuse (map_Kd)
-        let diffuse_texture = if let Some(t) = &m.diffuse_texture {
-            load_texture(parent_dir.join(t).to_str().unwrap(), false, device, queue)?
-        } else {
-            texture::Texture::from_color(
-                device, queue, [255, 255, 255, 255], "default_diffuse", false)?
+
+    // fallback to empty vector if materials failed to parse
+    let obj_materials = obj_materials.unwrap_or_else(|e| {
+        log::warn!("Failed to parse materials: {}", e);
+        Vec::new()
+    });
+
+    for m in obj_materials {
+        // helper closure to try loading texture, or use fallback
+        let mut get_texture = |
+            texture: Option<&String>,
+            is_normal: bool,
+            fallback_color: [u8; 4],
+            fallback_name: &str
+        | -> Result<texture::Texture> {
+            if let Some(t) = texture {
+                let path = parent_dir.join(t);
+                let path = path.to_string_lossy();
+                match load_texture(&path, is_normal, device, queue) {
+                    Ok(tex) => return Ok(tex),
+                    Err(e) => log::warn!("Failed to load texture {}: {}. Using fallback", path, e),
+                }
+            }
+
+            // if texture is None or failed loading, return fallback
+            texture::Texture::from_color(device, queue, fallback_color, fallback_name, is_normal)
         };
+
+        // diffuse (map_Kd)
+        let diffuse_texture = get_texture(m.diffuse_texture.as_ref(),
+            false, [255, 255, 255, 255], "default_diffuse")?;
 
         // normal (norm)
-        let normal_texture = if let Some(t) = &m.normal_texture {
-            load_texture(parent_dir.join(t).to_str().unwrap(),true, device, queue)?
-        } else {
-            texture::Texture::from_color(
-                device, queue, [128, 128, 255, 255], "default_normal", false)?
-        };
+        let normal_texture = get_texture(m.normal_texture.as_ref(),
+            true, [128, 128, 255, 255], "default_normal")?;
 
         // specular color (map_Ks)
-        let specular_texture = if let Some(t) = &m.specular_texture {
-            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
-        } else {
-            texture::Texture::from_color(
-                device, queue, [255, 255, 255, 255], "default_specular", false)?
-        };
+        let specular_texture = get_texture(m.specular_texture.as_ref(),
+            false, [255, 255, 255, 255], "default_specular")?;
 
         // dissolve/opacity (map_d)
-        let dissolve_texture = if let Some(t) = &m.dissolve_texture {
-            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
-        } else {
-            texture::Texture::from_color(
-                device, queue, [255, 255, 255, 255], "default_dissolve", false)?
-        };
+        let dissolve_texture = get_texture(m.dissolve_texture.as_ref(),
+            false, [255, 255, 255, 255], "default_dissolve")?;
 
         // ambient occlusion (map_Ka)
-        let ambient_texture = if let Some(t) = &m.ambient_texture {
-            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
-        } else {
-            texture::Texture::from_color(
-                device, queue, [255, 255, 255, 255], "default_ambient", false)?
-        };
+        let ambient_texture = get_texture(m.ambient_texture.as_ref(),
+            false, [255, 255, 255, 255], "default_ambient")?;
 
         // roughness (map_Pr)
-        let roughness_texture = if let Some(t) = &m.unknown_param.get("map_Pr") {
-            load_texture(parent_dir.join(t).to_str().unwrap(),false, device, queue)?
-        } else {
-            texture::Texture::from_color(
-                device, queue, [0, 0, 0, 255], "default_roughness", false)?
-        };
+        let roughness_texture = get_texture(m.unknown_param.get("map_Pr"),
+            false, [0, 0, 0, 255], "default_roughness")?;
 
         // metallic (map_Pm)
-        let metal_texture = if let Some(t) = m.unknown_param.get("map_Pm") {
-            load_texture(parent_dir.join(t).to_str().unwrap(), false, device, queue)?
-        } else {
-            texture::Texture::from_color(
-                device, queue, [0, 0, 0, 255], "default_metal", false)?
-        };
+        let metal_texture = get_texture(m.unknown_param.get("map_Pm"),
+            false, [0, 0, 0, 255], "default_metal")?;
 
         // parse keywords
         let ambient_color = clamp_color(m.ambient.unwrap_or([1.0, 1.0, 1.]));
@@ -208,6 +217,9 @@ pub async fn load_model(
     let meshes = models
         .into_iter()
         .map(|m| {
+            let has_texcoords = !m.mesh.texcoords.is_empty();
+            let has_normals = !m.mesh.normals.is_empty();
+
             let mut vertices = (0..m.mesh.positions.len() / 3)
                 .map(|i| model::ModelVertex {
                     position: [
@@ -215,33 +227,49 @@ pub async fn load_model(
                         m.mesh.positions[i * 3 + 1],
                         m.mesh.positions[i * 3 + 2],
                     ],
-                    tex_coords: [
-                        m.mesh.texcoords[i * 2],
-                        1.0 - m.mesh.texcoords[i * 2 + 1]
-                    ],
-                    normal: [
-                        m.mesh.normals[i * 3],
-                        m.mesh.normals[i * 3 + 1],
-                        m.mesh.normals[i * 3 + 2],
-                    ],
+                    tex_coords: if has_texcoords {
+                        [
+                            m.mesh.texcoords[i * 2],
+                            1.0 - m.mesh.texcoords[i * 2 + 1]
+                        ]
+                    } else {
+                        // fallback UV coordinate
+                        [0.0, 0.0]
+                    },
+                    normal: if has_normals {
+                        [
+                            m.mesh.normals[i * 3],
+                            m.mesh.normals[i * 3 + 1],
+                            m.mesh.normals[i * 3 + 2],
+                        ]
+                    } else {
+                        // fallback normal pointing up
+                        // TODO: calculate normals?
+                        [0.0, 1.0, 0.0]
+                    },
                 })
                 .collect::<Vec<_>>();
 
             let indices = &m.mesh.indices;
-            let mut triangles_included = vec![0; vertices.len()];
 
             let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{file_name:?} Vertex Buffer")),
+                label: Some(&format!("{file_name:?}_vertex_buffer")),
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
             let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{file_name:?} Index Buffer")),
+                label: Some(&format!("{file_name:?}_index_buffer")),
                 contents: bytemuck::cast_slice(&m.mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
 
-            log::info!("Loaded model: {}", m.name);
+            log::info!("Loaded model: {}->{} [v:{} i:{}]",
+                Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or(file_name),
+                m.name,
+                vertices.len(),
+                indices.len()
+            );
+
             model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,

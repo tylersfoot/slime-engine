@@ -109,21 +109,26 @@ impl Scene {
         file_path: &str,
         gfx: &GraphicsContext<'_>,
         renderer: &Renderer
-    ) -> usize {
+    ) -> Option<usize> {
         // load raw mesh data
-        let model = resources::load_model(
+        match resources::load_model(
             file_path,
             &gfx.device,
             &gfx.queue,
             &renderer.texture_bind_group_layout
-        ).await.unwrap();
-
+        ).await {
+            Ok(model) => {
         // wrap in asset container, creating empty instance buffer
         let asset = ModelAsset::new(&gfx.device, model);
-
         let id = self.assets.len();
         self.assets.push(asset);
-        id
+                Some(id)
+            },
+            Err(e) => {
+                log::error!("Error loading model {}: {:?}", file_path, e);
+                None
+            }
+        }
     }
 
     // spawns a node into the world, returns ID handle
@@ -236,7 +241,7 @@ impl Scene {
 
         // apply global transforms to nodes
         for (id, global_matrix) in global_transforms {
-            let node = self.nodes.get_mut(id).unwrap();
+            if let Some(node) = self.nodes.get_mut(id) {
             node.global_transform = global_matrix;
 
             // if the node has a model, convert it to bytes and bucket it
@@ -247,6 +252,7 @@ impl Scene {
                 };
                 instance_data[model_id].push(raw);
                 self.assets[model_id].instance_count += 1;
+                }
             }
         }
 

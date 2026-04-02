@@ -232,7 +232,7 @@ impl Engine<'_> {
 
             self.debug.update();
             print!(
-                "\rFPS: {:.2} | Total Frames: {:<6} | Node count: {}   ",
+                "\rFPS: {:.2} | Frames Drawn: {:<6} | Nodes: {}     ",
                 self.debug.fps,
                 self.debug.total_frames,
                 self.scene.nodes.len()
