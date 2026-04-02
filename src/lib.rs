@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::{io::Write, mem::ManuallyDrop};
+use std::mem::ManuallyDrop;
 use minifb::{KeyRepeat, MouseButton};
 use wgpu::util::DeviceExt;
 use image::GenericImageView;
@@ -23,7 +23,7 @@ pub use crate::window::Window;
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
 use crate::scene::Scene;
-use crate::transform::Transform;
+pub use crate::transform::Transform;
 
 // a struct to hold real-time debug information
 struct DebugInfo {
@@ -58,7 +58,17 @@ impl DebugInfo {
     }
 }
 
-struct Application<'a> {
+pub trait App {
+    // called once before the loop starts
+    // meant for stuff like loading models and spawning initial nodes
+    fn start(&mut self, app: &mut Engine);
+
+    // called every frame
+    // meant for game-loop stuff like moving nodes
+    fn update(&mut self, app: &mut Engine, dt: Duration);
+}
+
+pub struct Engine<'a> {
     pub gfx: GraphicsContext<'a>,
     pub renderer: Renderer,
     pub scene: Scene,
@@ -67,8 +77,8 @@ struct Application<'a> {
     window_active: bool,
 }
 
-impl Application<'_> {
-    async fn new(window: Window) -> Self {
+impl Engine<'_> {
+    pub async fn new(window: Window) -> Self {
         // init GPU backend
         let gfx = GraphicsContext::new(window).await;
         
@@ -78,48 +88,7 @@ impl Application<'_> {
         // build the scene (for camera, lights, models)
         let mut scene = Scene::new(&gfx, &renderer).await;
 
-
-        // load/spawn hardcoded assets for now
-
-        let cannon_model_id = scene.load_model("cannon/cannon.obj", &gfx, &renderer).await;
-        let cube_model_id = scene.load_model("cube2/cube.obj", &gfx, &renderer).await;
-        let unit_cube_model_id = scene.load_model("unit_cube.obj", &gfx, &renderer).await;
-
-        const SPACE_BETWEEN: f32 = 2.0;
-        const NUM_INSTANCES_PER_ROW: u32 = 1;
-        for z in 0..NUM_INSTANCES_PER_ROW {
-            for x in 0..NUM_INSTANCES_PER_ROW {
-                let x_pos = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                let z_pos = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-
-                let position = cgmath::Vector3::new(x_pos, 0.0, z_pos);
-
-                let rotation = if position.is_zero() {
-                    cgmath::Quaternion::one()
-                } else {
-                    cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
-                };
-
-                scene.spawn_node(
-                    Some(cannon_model_id),
-                    Transform::new().with_position(position).with_rotation(rotation)
-                );
-            }
-        }
-
-        scene.spawn_node(
-            Some(cube_model_id),
-            Transform::new().with_position([2.0, 0.5, 2.0])
-        );
-
-        scene.spawn_node(
-            Some(unit_cube_model_id),
-            Transform::new()
-                .with_position([0.0, -0.5, 0.0])
-                .with_scale([500.0, 0.1, 500.0])
-        );
-
-        let mut application = Application {
+        let mut engine = Engine {
             gfx,
             renderer,
             scene,
@@ -129,10 +98,10 @@ impl Application<'_> {
 
         // apply the config to the surface
         // tells GPU to create a swap chain (set of textures to draw to) with the w/h/format
-        let (width, height) = application.gfx.window.get_size();
-        application.resize(width as u32, height as u32);
+        let (width, height) = engine.gfx.window.get_size();
+        engine.resize(width as u32, height as u32);
 
-        application
+        engine
     }
 
     pub fn update(&mut self, dt: Duration) {
@@ -189,84 +158,90 @@ impl Application<'_> {
         self.gfx.configure_surface(width, height);
         self.renderer.resize(&self.gfx);
     }
-}
- 
-pub fn run(window: Window) {
-    // init the application; since Application::new() is async, 
-    // (requesting adaptor/device from OS takes time)
-    // pollster lets us call it in our sync fn and wait here until it's done 
-    let mut application = pollster::block_on(Application::new(window));
-    let mut last_render_time = Instant::now();
 
-    // main program loop
-    loop {
-        // processes events like key presses, mouse movements, close button, etc.
-        application.gfx.window.update();
+    pub fn run(mut self, mut app: impl App) {
+        // run user's setup code first
+        app.start(&mut self);
 
-        // handle special keys
-        let keys = application.gfx.window.get_keys();
-        let mouse_pressed = application.gfx.window.get_mouse_down(MouseButton::Left);
-        if keys.contains(&Key::Backspace) { return }
+        let mut last_render_time = Instant::now();
 
-        if (application.window_active &&
-            (keys.contains(&Key::Escape) || !application.gfx.window.is_active())) {
-            // unlock mouse if hit esc or unfocus window
-            application.gfx.window.set_cursor_visibility(true);
-            application.window_active = false;
+        // main program loop
+        loop {
+            // processes events like key presses, mouse movements, close button, etc.
+            self.gfx.window.update();
+
+            // handle special keys
+            let keys = self.gfx.window.get_keys();
+            let mouse_pressed = self.gfx.window.get_mouse_down(MouseButton::Left);
+            if keys.contains(&Key::Backspace) { return }
+
+            if self.window_active &&
+                (keys.contains(&Key::Escape) || !self.gfx.window.is_active()) {
+                // unlock mouse if hit esc or unfocus window
+                self.gfx.window.set_cursor_visibility(true);
+                self.window_active = false;
+            }
+            if !self.window_active && mouse_pressed {
+                // lock mouse if clicked on
+                self.gfx.window.set_cursor_visibility(false);
+                self.window_active = true;
+
+                // snap mouse immediately to center to camera doesn't jump
+                let (width, height) = self.gfx.window.get_size();
+                self.gfx.window.set_mouse_pos((width / 2) as f32, (height / 2) as f32);
+            }
+            
+            // handle infinite mouse movement
+            let mut mouse_delta = (0.0, 0.0);
+            if self.window_active && self.gfx.window.is_active()
+                && let Some((x, y)) = self.gfx.window.get_mouse_pos(MouseMode::Pass) {
+                    let (width, height) = self.gfx.window.get_size();
+                    let center_x = (width / 2) as f32;
+                    let center_y = (height / 2) as f32;
+
+                    let dx = x - center_x;
+                    let dy = y - center_y;
+
+                    // only update and snap is mouse actually moved
+                    if dx != 0.0 || dy != 0.0 {
+                        mouse_delta = (dx, dy);
+                        self.gfx.window.set_mouse_pos(center_x, center_y);
+                    }
+            }
+
+            // handle scroll wheel
+            let scroll_wheel_delta = self.gfx.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
+
+            // handle inputs
+            self.scene.camera_controller.handle_keys(&keys);
+            self.scene.camera_controller.handle_mouse(mouse_delta.0, mouse_delta.1);
+            self.scene.camera_controller.handle_mouse_scroll(scroll_wheel_delta);
+
+            // calculate delta time
+            let now = Instant::now();
+            let dt = now - last_render_time;
+            last_render_time = now;
+
+            // run user per-frame logic
+            app.update(&mut self, dt);
+
+            // update internal engine states
+            self.scene.update(dt, &self.gfx.queue);
+
+            if !self.gfx.window.is_open() {
+                return; // exit if window is closed
+            }
+
+            self.draw_frame();
+
+            self.debug.update();
+            print!(
+                "\rFPS: {:.2} | Total Frames: {:<6}",
+                self.debug.fps,
+                self.debug.total_frames,
+            );
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
         }
-        if (!application.window_active && mouse_pressed) {
-            // lock mouse if clicked on
-            application.gfx.window.set_cursor_visibility(false);
-            application.window_active = true;
-
-            // snap mouse immediately to center to camera doesn't jump
-            let (width, height) = application.gfx.window.get_size();
-            application.gfx.window.set_mouse_pos((width / 2) as f32, (height / 2) as f32);
-        }
-        
-        // handle infinite mouse movement
-        let mut mouse_delta = (0.0, 0.0);
-        if application.window_active && application.gfx.window.is_active()
-            && let Some((x, y)) = application.gfx.window.get_mouse_pos(MouseMode::Pass) {
-                let (width, height) = application.gfx.window.get_size();
-                let center_x = (width / 2) as f32;
-                let center_y = (height / 2) as f32;
-
-                let dx = x - center_x;
-                let dy = y - center_y;
-
-                // only update and snap is mouse actually moved
-                if dx != 0.0 || dy != 0.0 {
-                    mouse_delta = (dx, dy);
-                    application.gfx.window.set_mouse_pos(center_x, center_y);
-                }
-        }
-
-        // handle scroll wheel
-        let scroll_wheel_delta = application.gfx.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
-
-        // handle inputs
-        application.scene.camera_controller.handle_keys(&keys);
-        application.scene.camera_controller.handle_mouse(mouse_delta.0, mouse_delta.1);
-        application.scene.camera_controller.handle_mouse_scroll(scroll_wheel_delta);
-
-        // calculate delta time
-        let now = Instant::now();
-        let dt = now - last_render_time;
-        last_render_time = now;
-        application.scene.update(dt, &application.gfx.queue);
-
-        if !application.gfx.window.is_open() {
-            return; // exit if window is closed
-        }
-
-        application.draw_frame();
-        application.debug.update();
-        print!(
-            "\rFPS: {:.2} | Total Frames: {:<6}",
-            application.debug.fps,
-            application.debug.total_frames,
-        );
-        let _ = std::io::stdout().flush();
     }
 }
