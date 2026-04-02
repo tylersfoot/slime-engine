@@ -7,6 +7,7 @@ use slime_engine::{
     window::Window,
     WindowOptions,
     node::NodeId,
+    camera::CameraId,
 };
 use std::time::Duration;
 use pollster::block_on;
@@ -16,10 +17,26 @@ struct EpicGame {
     moving_cube_id: Option<NodeId>,
     floating_platform_id: Option<NodeId>,
     crazycorn_id: Option<NodeId>,
+    camera: Option<CameraId>,
+    camera2: Option<CameraId>,
 }
 
 impl App for EpicGame {
     fn start(&mut self, engine: &mut Engine) {
+        let camera = engine.scene.spawn_camera(
+            [0.0, 5.0, 10.0],
+            -90.0,
+            -20.0
+        );
+        self.camera = Some(camera);
+
+        let camera2 = engine.scene.spawn_camera(
+            [50.0, 20.0, 50.0],
+            180.0,
+            -45.0
+        );
+        self.camera2 = Some(camera2);
+
         let cube_model_id = block_on(engine.scene.load_model("unit_cube.obj", &engine.gfx, &engine.renderer));
         let crazycorn_model_id = block_on(engine.scene.load_model("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer));
 
@@ -107,6 +124,14 @@ impl App for EpicGame {
     }
 
     fn update(&mut self, engine: &mut Engine, dt: Duration) {
+        if let Some(camera) = self.camera && let Some(camera2) = self.camera2 {
+            if engine.gfx.window.is_key_down(minifb::Key::C) {
+                engine.scene.set_active_camera(camera2);
+            } else {
+                engine.scene.set_active_camera(camera);
+            }
+        }
+
         self.time_passed += dt.as_secs_f32();
         let delta = (dt.as_secs_f64() as f32).max(1e-6);
 
@@ -173,6 +198,8 @@ fn main() {
         moving_cube_id: None,
         floating_platform_id: None,
         crazycorn_id: None,
+        camera: None,
+        camera2: None,
     };
 
     engine.run(epic_game);

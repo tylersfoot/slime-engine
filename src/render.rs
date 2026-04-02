@@ -341,30 +341,34 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
-        // draw light
-        render_pass.set_pipeline(&self.light_render_pipeline);
-        render_pass.draw_light_model(
-            &scene.assets[0].model, // TODO: dont use first object lol
-            &scene.camera_bind_group,
-            &scene.light_bind_group,
-        );
+        // only draw if we have an active camera
+        if scene.active_camera.is_some() {
+            // draw light
+            render_pass.set_pipeline(&self.light_render_pipeline);
+            render_pass.draw_light_model(
+                &scene.assets[0].model, // TODO: dont use first object lol
+                &scene.camera_bind_group,
+                &scene.light_bind_group,
+            );
 
-        // draw scene objects
-        render_pass.set_pipeline(&self.render_pipeline);
-        for asset in &scene.assets {
-            if asset.instance_count > 0 {
-                // bind specific buffer for this model
-                render_pass.set_vertex_buffer(1, asset.instance_buffer.slice(..));
+            // draw scene objects
+            render_pass.set_pipeline(&self.render_pipeline);
+            for asset in &scene.assets {
+                if asset.instance_count > 0 {
+                    // bind specific buffer for this model
+                    render_pass.set_vertex_buffer(1, asset.instance_buffer.slice(..));
 
-                // draw all instances
-                render_pass.draw_model_instanced(
-                    &asset.model,
-                    0..asset.instance_count,
-                    &scene.camera_bind_group,
-                    &scene.light_bind_group,
-                );
+                    // draw all instances
+                    render_pass.draw_model_instanced(
+                        &asset.model,
+                        0..asset.instance_count,
+                        &scene.camera_bind_group,
+                        &scene.light_bind_group,
+                    );
+                }
             }
         }
+        
         // drop render pass manually
         drop(render_pass);
 

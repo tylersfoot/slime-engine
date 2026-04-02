@@ -2,15 +2,21 @@ use cgmath::*;
 use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 use crate::Key;
+use slotmap::new_key_type;
 
 const SAFE_FRAC_PI_2: f32 = FRAC_PI_2 - 0.0001;
+
+new_key_type! {
+    pub struct CameraId;
+}
 
 #[derive(Debug)]
 pub struct Camera {
     // position of the camera in 3D world space
     pub position: Point3<f32>,
-    yaw: Rad<f32>,
-    pitch: Rad<f32>,
+    pub yaw: Rad<f32>,
+    pub pitch: Rad<f32>,
+    pub projection: Projection,
 }
  
 impl Camera {
@@ -22,11 +28,17 @@ impl Camera {
         position: V,
         yaw: Y,
         pitch: P,
+        width: u32,
+        height: u32,
     ) -> Self {
         Self {
             position: position.into(),
             yaw: yaw.into(),
             pitch: pitch.into(),
+            projection: Projection::new(
+                width, height,
+                Deg(45.0), 0.1, 100.0
+            ),
         }
     }
 
@@ -172,6 +184,7 @@ impl CameraController {
     }
 }
 
+#[derive(Debug)]
 pub struct Projection {
     // aspect ratio of the screen (w/h) to prevent stretched/squished image
     aspect: f32,
