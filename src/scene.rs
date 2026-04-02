@@ -191,7 +191,7 @@ impl Scene {
         }
     }
 
-    pub fn update(&mut self, dt: std::time::Duration, queue: &wgpu::Queue) {
+    pub fn update(&mut self, dt: std::time::Duration, device: &wgpu::Device, queue: &wgpu::Queue) {
         // update camera
         if let Some(active_id) = self.active_camera
             && let Some(camera) = self.cameras.get_mut(active_id) {
@@ -253,11 +253,8 @@ impl Scene {
         // send the buckets to the wgpu buffers
         for (i, asset) in self.assets.iter_mut().enumerate() {
             if asset.instance_count > 0 {
-                // safeguard for now
-                assert!(
-                    asset.instance_count <= asset.capacity,
-                    "Exceeded instance capacity for model {}, max is {}", i, asset.capacity
-                );
+                // check if we need to allocate for more instances
+                asset.resize_buffer_if_needed(device, asset.instance_count);
 
                 queue.write_buffer(
                     &asset.instance_buffer,

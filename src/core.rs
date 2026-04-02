@@ -65,7 +65,8 @@ impl<'a> GraphicsContext<'a> {
             .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits:  wgpu::Limits::default(),
+                    // required_limits:  wgpu::Limits::default(),
+                    required_limits: adapter.limits(),
                     memory_hints: Default::default(),
                     trace: wgpu::Trace::Off,
                     experimental_features: wgpu::ExperimentalFeatures::disabled(),

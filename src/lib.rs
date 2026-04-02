@@ -104,10 +104,6 @@ impl Engine<'_> {
         engine
     }
 
-    pub fn update(&mut self, dt: Duration) {
-        self.scene.update(dt, &self.gfx.queue);
-    }
-
     pub fn draw_frame(&mut self) {
         let (width, height) = self.gfx.window.get_size();
         let frame = match self.gfx.surface.get_current_texture() {
@@ -226,7 +222,7 @@ impl Engine<'_> {
             app.update(&mut self, dt);
 
             // update internal engine states
-            self.scene.update(dt, &self.gfx.queue);
+            self.scene.update(dt, &self.gfx.device, &self.gfx.queue);
 
             if !self.gfx.window.is_open() {
                 return; // exit if window is closed
@@ -236,9 +232,10 @@ impl Engine<'_> {
 
             self.debug.update();
             print!(
-                "\rFPS: {:.2} | Total Frames: {:<6}",
+                "\rFPS: {:.2} | Total Frames: {:<6} | Node count: {}   ",
                 self.debug.fps,
                 self.debug.total_frames,
+                self.scene.nodes.len()
             );
             use std::io::Write;
             let _ = std::io::stdout().flush();

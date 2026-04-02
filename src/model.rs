@@ -457,12 +457,11 @@ pub struct ModelAsset {
 
 impl ModelAsset {
     pub fn new(device: &wgpu::Device, model: Model) -> Self {
-        // allocate for 200 instances to start
-        // TODO: resize when count > capacity
-        let capacity = 200;
+        // allocate for 10 instances to start
+        let capacity = 10;
         let instance_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
-                label: Some("model_instancce_buffer"),
+                label: Some("model_instance_buffer"),
                 size: (std::mem::size_of::<InstanceRaw>() * capacity) as wgpu::BufferAddress,
                 // COPY_DST so we can write to the buffer every frame
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
@@ -476,7 +475,32 @@ impl ModelAsset {
             instance_count: 0,
             capacity: capacity as u32,
         }
+    }
 
+    pub fn resize_buffer_if_needed(&mut self, device: &wgpu::Device, required_capacity: u32) {
+        // checks if the model instance buffer needs a higher instance capacity
+        if required_capacity > self.capacity {
+            // double capacity
+            let mut new_capacity = self.capacity * 2;
+            
+            // if still not enough, just set to the required capacity
+            if new_capacity < required_capacity {
+                new_capacity = required_capacity;
+            }
+
+            // create the new buffer
+            self.instance_buffer = device.create_buffer(
+                &wgpu::BufferDescriptor {
+                    label: Some("model_instance_buffer"),
+                    size: (std::mem::size_of::<InstanceRaw>() as u32 * new_capacity) as wgpu::BufferAddress,
+                    // COPY_DST so we can write to the buffer every frame
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }
+            );
+
+            self.capacity = new_capacity;
+        }
     }
 }
 
