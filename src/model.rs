@@ -127,43 +127,15 @@ impl Vertex for ModelVertex {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialUniforms {
-    // note: reordered for byte alignment
     // name ~ keyword - type/range - default
-    // Main keywords
-    pub ambient_color: [f32; 3],        // Ka ~ 3*[0.0, 1.0] ~ [1.0, 1.0, 1.0]
-    pub dissolve: f32,                  // d ~ [0.0, 1.0] ~ 1.0 (Tr = 1.0 - d)
-    pub diffuse_color: [f32; 3],        // Kd ~ 3*[0.0, 1.0] ~ [1.0, 1.0, 1.0]
-    pub specular_exponent: f32,         // Ns ~ [0.0, 1000.0] ~ 10.0 (Pr = roughness)
-    pub specular_color: [f32; 3],       // Ks ~ 3*[0.0, 1.0] ~ [0.0, 0.0, 0.0]
-    pub optical_density: f32,           // Ni ~ [0.001, 10.0] ~ 1.0
-    pub emissive_color: [f32; 3],       // Ke ~ 3*[0.0, 1.0] ~ [0.0, 0.0, 0.0]
-    pub reflection_sharpness: f32,      // sharpness ~ [0.0, 1000.0] ~ 60.0
-    pub transmission_filter: [f32; 3],  // Tf ~ 3*[0.0, 1.0] ~ [1.0, 1.0, 1.0]
-
-    // PBR extensions
-    // pub roughness: f32, // Pr ~ [0.0, 1.0] ~ 0.5
-    pub metallic: f32, // Pm ~ [0.0, 1.0] ~ 0.0
-    pub sheen: f32, // Ps ~ [0.0, 1.0] ~ 0.0
-    pub clearcoat_thickness: f32, // Pc ~ [0.0, 1.0] ~ 0.0
-    pub clearcoat_roughness: f32, // Pcr ~ [0.0, 1.0] ~ 0.0
-    pub anisotropy: f32, // aniso ~ [0.0, 1.0] ~ 0.0
-    pub anisotropy_rotation: f32, // anisor ~ [0.0, 1.0] ~ 0.0
-
-    // Illumination state
-    pub illumination_model: u32, // illum ~ [0, 10] ~ 2
-    // 0. Color on and Ambient off
-    // 1. Color on and Ambient on
-    // 2. Highlight on
-    // 3. Reflection on and Ray trace on
-    // 4. Transparency: Glass on, Reflection: Ray trace on
-    // 5. Reflection: Fresnel on and Ray trace on
-    // 6. Transparency: Refraction on, Reflection: Fresnel off and Ray trace on
-    // 7. Transparency: Refraction on, Reflection: Fresnel on and Ray trace on
-    // 8. Reflection on and Ray trace off
-    // 9. Transparency: Glass on, Reflection: Ray trace off
-    // 10. Casts shadows onto invisible surfaces
-
-    pub _padding: [f32; 2],
+    pub ambient_color: [f32; 3],  // Ka ~ 3*[0.0, 1.0] ~ [1.0, 1.0, 1.0]
+    pub dissolve: f32,            // d ~ [0.0, 1.0] ~ 1.0 (Tr = 1.0 - d)
+    pub diffuse_color: [f32; 3],  // Kd ~ 3*[0.0, 1.0] ~ [1.0, 1.0, 1.0]
+    pub specular_exponent: f32,   // Ns ~ [0.0, 1000.0] ~ 10.0 (Pr = roughness)
+    pub specular_color: [f32; 3], // Ks ~ 3*[0.0, 1.0] ~ [0.0, 0.0, 0.0]
+    pub _padding1: f32,
+    pub emissive_color: [f32; 3], // Ke ~ 3*[0.0, 1.0] ~ [0.0, 0.0, 0.0]
+    pub _padding2: f32,
 }
 
 impl MaterialUniforms {
@@ -172,37 +144,18 @@ impl MaterialUniforms {
         diffuse_color: [f32; 3],
         specular_color: [f32; 3],
         emissive_color: [f32; 3],
-        transmission_filter: [f32; 3],
         dissolve: f32,
         specular_exponent: f32,
-        optical_density: f32,
-        reflection_sharpness: f32,
-        metallic: f32,
-        sheen: f32,
-        clearcoat_thickness: f32,
-        clearcoat_roughness: f32,
-        anisotropy: f32,
-        anisotropy_rotation: f32,
-        illumination_model: u32,
     ) -> Self {
         Self {
             ambient_color,
             diffuse_color,
             specular_color,
             emissive_color,
-            transmission_filter,
             dissolve,
             specular_exponent,
-            optical_density,
-            reflection_sharpness,
-            metallic,
-            sheen,
-            clearcoat_thickness,
-            clearcoat_roughness,
-            anisotropy,
-            anisotropy_rotation,
-            illumination_model,
-            _padding: [0.0; 2],
+            _padding1: 0.0,
+            _padding2: 0.0,
         }
     }
 }
@@ -213,21 +166,12 @@ impl Default for MaterialUniforms {
         Self {
             ambient_color: [1.0, 1.0, 1.0],
             diffuse_color: [1.0, 1.0, 1.0],
-            specular_color: [0.0, 0.0, 0.0],
+            specular_color: [0.5, 0.5, 0.5],
             emissive_color: [0.0, 0.0, 0.0],
-            transmission_filter: [1.0, 1.0, 1.0],
             dissolve: 1.0,
-            specular_exponent: 10.0,
-            optical_density: 1.0,
-            reflection_sharpness: 60.0,
-            metallic: 0.0,
-            sheen: 0.0,
-            clearcoat_thickness: 0.0,
-            clearcoat_roughness: 0.0,
-            anisotropy: 0.0,
-            anisotropy_rotation: 0.0,
-            illumination_model: 2,
-            _padding: [0.0; 2],
+            specular_exponent: 50.0,
+            _padding1: 0.0,
+            _padding2: 0.0,
         }
     }
 }
@@ -235,12 +179,6 @@ impl Default for MaterialUniforms {
 pub struct Material {
     pub name: String,
     pub diffuse_texture: texture::Texture,
-    pub normal_texture: texture::Texture,
-    pub specular_texture: texture::Texture,
-    pub dissolve_texture: texture::Texture,
-    pub ambient_texture: texture::Texture,
-    pub roughness_texture: texture::Texture,
-    pub metal_texture: texture::Texture,
     pub uniforms: MaterialUniforms,
     pub uniform_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -271,63 +209,8 @@ impl Material {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&textures.diffuse.sampler),
                 },
-
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&textures.normal.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&textures.normal.sampler),
-                },
-
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&textures.specular.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(&textures.specular.sampler),
-                },
-
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&textures.dissolve.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::Sampler(&textures.dissolve.sampler),
-                },
-
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(&textures.ambient.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::Sampler(&textures.ambient.sampler),
-                },
-
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: wgpu::BindingResource::TextureView(&textures.roughness.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: wgpu::BindingResource::Sampler(&textures.roughness.sampler),
-                },
-
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::TextureView(&textures.metal.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 13,
-                    resource: wgpu::BindingResource::Sampler(&textures.metal.sampler),
-                },
-
-                wgpu::BindGroupEntry {
-                    binding: 14,
                     resource: uniform_buffer.as_entire_binding(),
                 }
             ],
@@ -337,12 +220,6 @@ impl Material {
         Self {
             name: String::from(name),
             diffuse_texture: textures.diffuse,
-            normal_texture: textures.normal,
-            specular_texture: textures.specular,
-            dissolve_texture: textures.dissolve,
-            ambient_texture: textures.ambient,
-            roughness_texture: textures.roughness,
-            metal_texture: textures.metal,
             uniforms,
             uniform_buffer,
             bind_group,
@@ -360,64 +237,33 @@ impl Material {
 
 pub struct MaterialTextures {
     pub diffuse: texture::Texture, // map_Kd
-    pub normal: texture::Texture, // norm/bump/map_bump
-    pub specular: texture::Texture, // map_Ks
-    pub dissolve: texture::Texture, // map_d
-    pub ambient: texture::Texture, // map_Ka
-    pub roughness: texture::Texture, // map_Pr, 1 - map_Ns
-    pub metal: texture::Texture, // map_Pm
-    // pub sheen: texture::Texture, // map_Ps
-    // pub emissive: texture::Texture, // map_Ke
-    // pub displacement: texture::Texture, // disp
-    // pub reflection: texture::Texture, // refl
-    // pub decal: texture::Texture, // decal
 }
 
 impl MaterialTextures {
     pub fn new(
         diffuse: texture::Texture,
-        normal: texture::Texture,
-        specular: texture::Texture,
-        dissolve: texture::Texture,
-        ambient: texture::Texture,
-        roughness: texture::Texture,
-        metal: texture::Texture,
     ) -> Self {
         Self {
             diffuse,
-            normal,
-            specular,
-            dissolve,
-            ambient,
-            roughness,
-            metal,
         }
     }
 
-    /// generates default/fallback 1x1 textures
+    // generates default/fallback 1x1 textures
     pub fn default(
         device: &wgpu::Device,
         queue: &wgpu::Queue
     ) -> anyhow::Result<Self> {
         // white - identity multiplier for standard maps
-        let diffuse = texture::Texture::from_color(device, queue, [255, 255, 255, 255], "default_diffuse", false)?;
-        let specular = texture::Texture::from_color(device, queue, [255, 255, 255, 255], "default_specular", false)?;
-        let dissolve = texture::Texture::from_color(device, queue, [255, 255, 255, 255], "default_dissolve", false)?;
-        let ambient = texture::Texture::from_color(device, queue, [255, 255, 255, 255], "default_ambient", false)?;
-        let roughness = texture::Texture::from_color(device, queue, [255, 255, 255, 255], "default_roughness", false)?;
-        // flat normal points straight up in tangent space (0.5, 0.5, 1.0)
-        let normal = texture::Texture::from_color(device, queue, [128, 128, 255, 255], "default_normal", true)?;
-        // black - default to non-metallic
-        let metal = texture::Texture::from_color(device, queue, [0, 0, 0, 255], "default_metal", false)?;
+        let diffuse = texture::Texture::from_color(
+            device,
+            queue,
+            [255, 255, 255, 255],
+            "default_diffuse",
+            false
+        )?;
 
         Ok(Self {
             diffuse,
-            normal,
-            specular,
-            dissolve,
-            ambient,
-            roughness,
-            metal,
         })
     }
 

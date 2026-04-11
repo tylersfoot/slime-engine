@@ -78,30 +78,6 @@ fn vs_main(
 var diffuse_texture: texture_2d<f32>;
 @group(0) @binding(1)
 var diffuse_sampler: sampler;
-@group(0) @binding(2)
-var normal_texture: texture_2d<f32>;
-@group(0) @binding(3)
-var normal_sampler: sampler;
-@group(0) @binding(4)
-var specular_texture: texture_2d<f32>;
-@group(0) @binding(5)
-var specular_sampler: sampler;
-@group(0) @binding(6)
-var dissolve_texture: texture_2d<f32>;
-@group(0) @binding(7)
-var dissolve_sampler: sampler;
-@group(0) @binding(8)
-var ambient_texture: texture_2d<f32>;
-@group(0) @binding(9)
-var ambient_sampler: sampler;
-@group(0) @binding(10)
-var roughness_texture: texture_2d<f32>;
-@group(0) @binding(11)
-var roughness_sampler: sampler;
-@group(0) @binding(12)
-var metal_texture: texture_2d<f32>;
-@group(0) @binding(13)
-var metal_sampler: sampler;
 
 struct MaterialUniforms {
     ambient_color: vec3<f32>,
@@ -109,70 +85,37 @@ struct MaterialUniforms {
     diffuse_color: vec3<f32>,
     specular_exponent: f32,
     specular_color: vec3<f32>,
-    optical_density: f32,
     emissive_color: vec3<f32>,
-    reflection_sharpness: f32,
-    transmission_filter: vec3<f32>,
-    metallic: f32,
-    sheen: f32,
-    clearcoat_thickness: f32,
-    clearcoat_roughness: f32,
-    anisotropy: f32,
-    anisotropy_rotation: f32,
-    illumination_model: u32,
 };
 
-@group(0) @binding(14)
+@group(0) @binding(2)
 var<uniform> material: MaterialUniforms;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    
-    var object_color: vec4<f32>;
-    let normal_map: vec4<f32> = textureSample(normal_texture, normal_sampler, in.tex_coords);
-    let specular_map = textureSample(specular_texture, specular_sampler, in.tex_coords);
-    let metal_map = textureSample(metal_texture, metal_sampler, in.tex_coords);
-    let ambient_map = textureSample(ambient_texture, ambient_sampler, in.tex_coords);
-    let roughness_map = textureSample(roughness_texture, roughness_sampler, in.tex_coords);
-
+    let normal = normalize(in.world_normal);
     let texture_color = textureSample(diffuse_texture, diffuse_sampler, in.tex_coords);
-    object_color = texture_color * vec4<f32>(material.diffuse_color, 1.0) * in.instance_color;
+    let object_color: vec4<f32> = texture_color * vec4<f32>(material.diffuse_color, 1.0) * in.instance_color;
     
-
     // normalized vectors (world space)
     let light_vector: vec3<f32> = normalize(light.position - in.world_position);
     let view_vector: vec3<f32> = normalize(camera.view_pos.xyz - in.world_position);
-    let reflected_light_vector: vec3<f32> = reflect(-light_vector, in.world_normal);
+    let reflected_light_vector: vec3<f32> = reflect(-light_vector, normal);
 
-    // metalness: removes diffuse color and tints reflections
-    let metalness = material.metallic * metal_map.r;
-    let diffuse_albedo = object_color.xyz * (1.0-metalness);
-
-    // ambient lighting: baseline room lighting, multiplied by ao map
-    let ambient_scene_light = light.color * 0.1;
-    let ambient_occlusion = ambient_map.r;
-    let ambient_color = ambient_scene_light * ambient_occlusion * material.ambient_color;
+    // ambient lighting: baseline room lighting
+    let ambient_strength = 0.1;
+    let ambient_color = light.color * ambient_strength * material.ambient_color;
 
     // diffuse lighting: direct lighting from the light source
-    let diffuse_strength = max(dot(light_vector, in.world_normal), 0.0);
-    let diffuse_color = light.color * diffuse_strength * diffuse_albedo;
+    let diffuse_strength = max(dot(light_vector, normal), 0.0);
+    let diffuse_color = light.color * diffuse_strength;
 
     // specular lighting: the light source reflecting off objects into camera
-    let smoothness = 1.0 - roughness_map.r;
-    let specular_focus = clamp((smoothness * smoothness) * material.specular_exponent, 1.0, 1000.0);
-    // F0 (4% reflectivity for non-metals)
-    let dielectric_base = vec3<f32>(0.04, 0.04, 0.04);
-    let specular_base = dielectric_base * material.specular_color * specular_map.rgb;
-    // tints based on metalness (mixes between 4% grey and the base color of the metal)
-    let specular_metal_tint = mix(specular_base, object_color.xyz, metalness);
+    let specular_focus = clamp(material.specular_exponent, 1.0, 1000.0);
     let specular_strength = pow(max(dot(reflected_light_vector, view_vector), 0.0), specular_focus);
-    // energy conservation - multiply final color by "smoothness"
-    let specular_color = specular_strength * specular_metal_tint * light.color * smoothness;
+    let specular_color = specular_strength * material.specular_color * light.color;
 
-
-    // let result = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
-    // let result: vec3<f32> = specular_color;
-    let result: vec3<f32> = (ambient_color * diffuse_albedo) + diffuse_color + specular_color;
-
+    // let result: vec3<f32> = (ambient_color + diffuse_color) * object_color.rgb + specular_color;
+    let result: vec3<f32> = (ambient_color + diffuse_color + specular_color) * object_color.rgb;
     return vec4<f32>(result, object_color.a);
 }

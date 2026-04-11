@@ -122,45 +122,18 @@ pub async fn load_model(
         // diffuse (map_Kd)
         let diffuse_texture = get_texture(m.diffuse_texture.as_ref(),
             false, [255, 255, 255, 255], "default_diffuse")?;
-
-        // normal (norm)
-        let normal_texture = get_texture(m.normal_texture.as_ref(),
-            true, [128, 128, 255, 255], "default_normal")?;
-
-        // specular color (map_Ks)
-        let specular_texture = get_texture(m.specular_texture.as_ref(),
-            false, [255, 255, 255, 255], "default_specular")?;
-
-        // dissolve/opacity (map_d)
-        let dissolve_texture = get_texture(m.dissolve_texture.as_ref(),
-            false, [255, 255, 255, 255], "default_dissolve")?;
-
-        // ambient occlusion (map_Ka)
-        let ambient_texture = get_texture(m.ambient_texture.as_ref(),
-            false, [255, 255, 255, 255], "default_ambient")?;
-
-        // roughness (map_Pr)
-        let roughness_texture = get_texture(m.unknown_param.get("map_Pr"),
-            false, [0, 0, 0, 255], "default_roughness")?;
-
-        // metallic (map_Pm)
-        let metal_texture = get_texture(m.unknown_param.get("map_Pm"),
-            false, [0, 0, 0, 255], "default_metal")?;
-
+        
         // parse keywords
         let ambient_color = clamp_color(m.ambient.unwrap_or([1.0, 1.0, 1.]));
         let diffuse_color = clamp_color(m.diffuse.unwrap_or([1.0, 1.0, 1.0]));
         let specular_color = clamp_color(m.specular.unwrap_or([0.0, 0.0, 0.0]));
         let emissive_color = clamp_color(parse_vec3(m.unknown_param.get("Ke"), [0.0, 0.0, 0.0]));
-        let transmission_filter = clamp_color(parse_vec3(m.unknown_param.get("Tf"), [1.0, 1.0, 1.0]));
         // d first, then Tr
         let dissolve = m.dissolve.or_else(|| {
             m.unknown_param.get("Tr")
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .map(|tr| 1.0 - tr)
         }).unwrap_or(1.0).clamp(0.0, 1.0);
-        let reflection_sharpness = parse_f32(m.unknown_param.get("sharpness"), 60.0).clamp(0.0, 1000.0);
-        let optical_density = m.optical_density.unwrap_or(1.0).clamp(0.001, 10.0);
         // Ns first, then Pr
         let specular_exponent = m.shininess.or_else(|| {
             m.unknown_param.get("Pr")
@@ -169,28 +142,12 @@ pub async fn load_model(
                     (2.0 / (pr.max(0.0001) * pr.max(0.0001))) - 2.0
                 })
             }).unwrap_or(10.0).clamp(0.0, 1000.0);
-        let metallic = parse_f32(m.unknown_param.get("Pm"), 0.0).clamp(0.0, 1.0);
-        let sheen = parse_f32(m.unknown_param.get("Ps"), 0.0).clamp(0.0, 1.0);
-        let clearcoat_thickness = parse_f32(m.unknown_param.get("Pc"), 0.0).clamp(0.0, 1.0);
-        let clearcoat_roughness = parse_f32(m.unknown_param.get("Pcr"), 0.0).clamp(0.0, 1.0);
-        let anisotropy = parse_f32(m.unknown_param.get("aniso"), 0.0).clamp(0.0, 1.0);
-        let anisotropy_rotation = parse_f32(m.unknown_param.get("anisor"), 0.0).clamp(0.0, 1.0);
-        
-        let illumination_model = u32::from(m.illumination_model.unwrap_or(2)).clamp(0, 10); 
-
-
 
         materials.push(model::Material::new(
             device,
             &m.name,
             model::MaterialTextures::new(
                 diffuse_texture,
-                normal_texture,
-                specular_texture,
-                dissolve_texture,
-                ambient_texture,
-                roughness_texture,
-                metal_texture,
             ),
             layout,
             model::MaterialUniforms::new(
@@ -198,18 +155,8 @@ pub async fn load_model(
                 diffuse_color,
                 specular_color,
                 emissive_color,
-                transmission_filter,
                 dissolve,
                 specular_exponent,
-                optical_density,
-                reflection_sharpness,
-                metallic,
-                sheen,
-                clearcoat_thickness,
-                clearcoat_roughness,
-                anisotropy,
-                anisotropy_rotation,
-                illumination_model,
             )
         ));
     }
