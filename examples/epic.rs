@@ -6,11 +6,17 @@ use slime_engine::{
     transform::Transform, 
     window::Window,
     WindowOptions,
-    node::NodeId,
-    camera::CameraId,
+    node::Node,
+    primitives::{Primitives, Primitive},
+    model::ModelAsset,
+    scene::{NodeId, ModelId, CameraId},
 };
 use std::time::Duration;
 use pollster::block_on;
+
+fn rand_color() -> [f32; 4] {
+    [rand::random(), rand::random(), rand::random(), 1.0]
+}
 
 struct EpicGame {
     time_passed: f32,
@@ -37,15 +43,17 @@ impl App for EpicGame {
         );
         self.camera2 = Some(camera2);
 
-        let cube_model_id = block_on(engine.scene.load_model("unit_cube.obj", &engine.gfx, &engine.renderer));
-        let crazycorn_model_id = block_on(engine.scene.load_model("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer));
+        // let cube_model_id = block_on(engine.scene.load_model("unit_cube.obj", &engine.gfx, &engine.renderer)).unwrap();
+        let cube_model = engine.scene.load_primitive(Primitive::Cube, &engine.gfx, &engine.renderer);
+        let crazycorn_model = block_on(engine.scene.load_model("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer)).unwrap();
 
         // moving cube
         let moving_cube_id = engine.scene.spawn_node(
-            Some(cube_model_id),
-            Transform::new()
-                .with_position([0.0, 20.0, -5.0])
-                .with_scale([2.0, 2.0, 2.0])
+            Node::new(Some(cube_model)).with_transform(
+                Transform::new()
+                    .with_position([0.0, 20.0, -5.0])
+                    .with_scale([2.0, 2.0, 2.0])
+                ).with_color(rand_color())
         );
         self.moving_cube_id = Some(moving_cube_id);
 
@@ -58,10 +66,11 @@ impl App for EpicGame {
                 let x = (i as f32 - (grid_size as f32) / 2.0 + 0.5) * tile_size;
                 let z = (j as f32 - (grid_size as f32) / 2.0 + 0.5) * tile_size;
                 engine.scene.spawn_node(
-                    Some(cube_model_id),
-                    Transform::new()
-                        .with_position([x, floor_y, z])
-                        .with_scale([tile_size, 2.0, tile_size])
+                    Node::new(Some(cube_model)).with_transform(
+                        Transform::new()
+                            .with_position([x, floor_y, z])
+                            .with_scale([tile_size, 2.0, tile_size])
+                    ).with_color(rand_color())
                 );
             }
         }
@@ -76,21 +85,23 @@ impl App for EpicGame {
                 // height wobbles so it's not all uniform
                 let h = 1.0 + ((i as f32 * 0.5).sin() + (j as f32 * 0.5).cos()).abs() * 3.0;
                 engine.scene.spawn_node(
-                    Some(cube_model_id),
-                    Transform::new()
-                        .with_position([x, floor_y + h / 2.0, z])
-                        .with_scale([1.0, h, 1.0])
+                    Node::new(Some(cube_model)).with_transform(
+                        Transform::new()
+                            .with_position([x, floor_y + h / 2.0, z])
+                            .with_scale([1.0, h, 1.0])
+                    ).with_color(rand_color())
                 );
             }
         }
 
         // floating tilted platform
         let floating_platform_id = engine.scene.spawn_node(
-            Some(cube_model_id),
-            Transform::new()
-                .with_position([0.0, 20.0, -5.0])
-                .with_rotation(Quaternion::from(Euler::new(Deg(30.0), Deg(45.0), Deg(0.0))))
-                .with_scale([3.0, 0.2, 3.0])
+            Node::new(Some(cube_model)).with_transform(
+                Transform::new()
+                    .with_position([0.0, 20.0, -5.0])
+                    .with_rotation(Quaternion::from(Euler::new(Deg(30.0), Deg(45.0), Deg(0.0))))
+                    .with_scale([3.0, 0.2, 3.0])
+            ).with_color(rand_color())
         );
         self.floating_platform_id = Some(floating_platform_id);
 
@@ -102,22 +113,24 @@ impl App for EpicGame {
             let z = angle.sin() * radius - 5.0;
             let size = 0.5 + (k as f32 * 0.2);
             engine.scene.spawn_node(
-                Some(cube_model_id),
+                Node::new(Some(cube_model)).with_transform(
                 Transform::new()
                     .with_position([x, 10.0, z])
-                .with_rotation(Quaternion::from(Euler::new(
-                    Deg(k as f32 * 12.0),
-                    Deg(k as f32 * 20.0),
-                    Deg(0.0)
-                )))
+                    .with_rotation(Quaternion::from(Euler::new(
+                        Deg(k as f32 * 12.0),
+                        Deg(k as f32 * 20.0),
+                        Deg(0.0)
+                    )))
+                ).with_color(rand_color())
             );
         }
 
         let crazycorn_id = engine.scene.spawn_node(
-            Some(crazycorn_model_id),
-            Transform::new()
-                .with_position([30.0, 0.0, 0.0])
-                .with_scale([0.02, 0.02, 0.02])
+            Node::new(Some(crazycorn_model)).with_transform(
+                Transform::new()
+                    .with_position([30.0, 0.0, 0.0])
+                    .with_scale([0.02, 0.02, 0.02])
+            )
         );
         self.crazycorn_id = Some(crazycorn_id);
 

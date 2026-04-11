@@ -28,6 +28,8 @@ struct InstanceInput {
     @location(9) normal_matrix_0: vec3<f32>,
     @location(10) normal_matrix_1: vec3<f32>,
     @location(11) normal_matrix_2: vec3<f32>,
+
+    @location(12) instance_color: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -35,6 +37,7 @@ struct VertexOutput {
     @location(0) tex_coords: vec2<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) world_position: vec3<f32>,
+    @location(3) instance_color: vec4<f32>,
 };
 
 @vertex
@@ -64,6 +67,7 @@ fn vs_main(
     out.world_normal = normal_matrix * model.normal;
     out.world_position = world_position.xyz;
     out.clip_position = camera.view_proj * world_position;
+    out.instance_color = instance.instance_color;
 
     return out;
 }
@@ -131,21 +135,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ambient_map = textureSample(ambient_texture, ambient_sampler, in.tex_coords);
     let roughness_map = textureSample(roughness_texture, roughness_sampler, in.tex_coords);
 
-    // checkered ground
-    // let grid = floor(in.world_position.xz);
-    // let checker = (i32(grid.x) + i32(grid.y)) % 2;
-    // if (in.world_position.y < -0.395) {
-    //     if (checker == 0) {
-    //         object_color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
-    //     } else {
-    //         object_color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
-    //     }
-    // } else {
-    //     let texture_color = textureSample(diffuse_texture, diffuse_sampler, in.tex_coords);
-    //     object_color = texture_color * vec4<f32>(material.diffuse_color, 1.0);
-    // }
     let texture_color = textureSample(diffuse_texture, diffuse_sampler, in.tex_coords);
-    object_color = texture_color * vec4<f32>(material.diffuse_color, 1.0);
+    object_color = texture_color * vec4<f32>(material.diffuse_color, 1.0) * in.instance_color;
     
 
     // normalized vectors (world space)

@@ -18,6 +18,7 @@ pub mod resources;
 pub mod camera;
 pub mod transform;
 pub mod node;
+pub mod primitives;
 
 use crate::window::Window;
 use crate::core::GraphicsContext;

@@ -7,29 +7,13 @@ pub trait Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static>;
 }
 
-pub struct Instance {
-    pub transform: Transform,
-}
- 
-impl Instance {
-    pub fn new(transform: Transform) -> Self {
-        Self { transform }
-    }
-    pub fn to_raw(&self) -> InstanceRaw {
-        let model_matrix = self.transform.calc_matrix();
-        InstanceRaw {
-            model: model_matrix.into(),
-            normal: cgmath::Matrix3::from(self.transform.rotation).into(),  
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 // the raw data of the instance to pass to the GPU
 pub struct InstanceRaw {
     pub model: [[f32; 4]; 4],
     pub normal: [[f32; 3]; 3],
+    pub color: [f32; 4],
 }
  
 impl InstanceRaw {
@@ -77,6 +61,12 @@ impl InstanceRaw {
                     offset: std::mem::size_of::<[f32; 22]>() as wgpu::BufferAddress,
                     shader_location: 11,
                     format: wgpu::VertexFormat::Float32x3,
+                },
+                // color: Vec4
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 25]>() as wgpu::BufferAddress,
+                    shader_location: 12,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
             ],
         }
@@ -251,6 +241,8 @@ pub struct Material {
     pub ambient_texture: texture::Texture,
     pub roughness_texture: texture::Texture,
     pub metal_texture: texture::Texture,
+    pub uniforms: MaterialUniforms,
+    pub uniform_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
 }
 
@@ -260,11 +252,11 @@ impl Material {
         name: &str,
         textures: MaterialTextures,
         layout: &wgpu::BindGroupLayout,
-        material_uniforms: MaterialUniforms,
+        uniforms: MaterialUniforms,
     ) -> Self {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("{:?}-uniform-buffer", name)),
-            contents: bytemuck::cast_slice(&[material_uniforms]),
+            contents: bytemuck::cast_slice(&[uniforms]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -351,8 +343,18 @@ impl Material {
             ambient_texture: textures.ambient,
             roughness_texture: textures.roughness,
             metal_texture: textures.metal,
+            uniforms,
+            uniform_buffer,
             bind_group,
         }
+    }
+
+    pub fn update_uniforms(&self, queue: &wgpu::Queue) {
+        queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[self.uniforms]),
+        );
     }
 }
 
@@ -442,6 +444,43 @@ pub struct Mesh {
 pub struct Model {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
+}
+
+impl Model {
+    // builds a model from raw data
+    pub fn from_raw(
+        device: &wgpu::Device,
+        name: &str,
+        vertices: &[ModelVertex],
+        indices: &[i32],
+        material: Material,
+    ) -> Self {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{name:?}_vertex_buffer")),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{name:?}_index_buffer")),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        log::info!("Created raw model: {} | {} vertices", name, vertices.len());
+        let mesh = Mesh {
+            name: name.to_string(),
+            vertex_buffer,
+            index_buffer,
+            num_elements: indices.len() as u32,
+            material: 0, // first (and only) material in array
+        };
+
+        Self {
+            meshes: vec![mesh],
+            materials: vec![material],
+        }
+    }
 }
 
 // represents a loaded 3D asset + buffer to draw instances

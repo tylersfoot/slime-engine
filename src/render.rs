@@ -240,6 +240,8 @@ impl Renderer {
                 &render_pipeline_layout,
                 gfx.config.format,
                 Some(texture::Texture::DEPTH_FORMAT),
+                wgpu::CompareFunction::Less,
+                true,
                 &[model::ModelVertex::desc(), crate::model::InstanceRaw::desc()],
                 shader,
                 Some("render_pipeline"),
@@ -264,6 +266,8 @@ impl Renderer {
                 &layout,
                 gfx.config.format,
                 Some(texture::Texture::DEPTH_FORMAT),
+                wgpu::CompareFunction::Less,
+                true,
                 &[model::ModelVertex::desc()],
                 shader,
                 Some("light_render_pipeline"),
@@ -315,10 +319,10 @@ impl Renderer {
                         // at the start, clear the texture to a background color
                         load: wgpu::LoadOp::Clear(
                             wgpu::Color {
-                                r: 0.1,
-                                g: 0.2,
-                                b: 0.3,
-                                a: 1.0,
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
                             }
                         ),
                         // at the end, store the results into the texture
@@ -345,15 +349,22 @@ impl Renderer {
         if scene.active_camera.is_some() {
             // draw light
             render_pass.set_pipeline(&self.light_render_pipeline);
-            render_pass.draw_light_model(
-                &scene.assets[0].model, // TODO: dont use first object lol
-                &scene.camera_bind_group,
-                &scene.light_bind_group,
-            );
+
+            // get first object for now
+            // TODO: dedicated light object?
+            if let Some(light_asset) = scene.assets.values().next() {
+                render_pass.draw_light_model(
+                    &light_asset.model,
+                    &scene.camera_bind_group,
+                    &scene.light_bind_group,
+                );
+            }
+
 
             // draw scene objects
             render_pass.set_pipeline(&self.render_pipeline);
-            for asset in &scene.assets {
+
+            for asset in scene.assets.values() {
                 if asset.instance_count > 0 {
                     // bind specific buffer for this model
                     render_pass.set_vertex_buffer(1, asset.instance_buffer.slice(..));
@@ -384,6 +395,8 @@ fn create_render_pipeline(
     layout: &wgpu::PipelineLayout,
     color_format: wgpu::TextureFormat,
     depth_format: Option<wgpu::TextureFormat>,
+    depth_compare: wgpu::CompareFunction,
+    depth_write_enabled: bool,
     vertex_layouts: &[wgpu::VertexBufferLayout],
     shader: wgpu::ShaderModuleDescriptor,
     label: Option<&str>,
@@ -451,12 +464,12 @@ fn create_render_pipeline(
         // stencil buffer: lets you perform masking operations
         depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
             format,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(depth_write_enabled),
             // tells us when pixels are discarded
             // Less: pixels will be drawn front to back
             // other options: Never, Less, Equal, LessEqual,
             // Greater, NotEqual, GreaterEqual, Always
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(depth_compare),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

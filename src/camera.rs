@@ -2,13 +2,8 @@ use cgmath::*;
 use std::time::Duration;
 use std::f32::consts::FRAC_PI_2;
 use crate::Key;
-use slotmap::new_key_type;
 
 const SAFE_FRAC_PI_2: f32 = FRAC_PI_2 - 0.0001;
-
-new_key_type! {
-    pub struct CameraId;
-}
 
 #[derive(Debug)]
 pub struct Camera {

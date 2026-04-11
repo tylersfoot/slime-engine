@@ -1,20 +1,28 @@
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
-use crate::camera::{Camera, CameraId, CameraUniform, CameraController, Projection};
-use crate::model::{ModelAsset, Instance, InstanceRaw, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelVertex};
+use crate::camera::{Camera, CameraUniform, CameraController, Projection};
+use crate::model::{ModelAsset, InstanceRaw, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelVertex};
 use crate::texture::{Texture};
 use crate::resources;
 use crate::transform::Transform;
-use crate::node::{Node, NodeId};
+use crate::node::Node;
+use crate::primitives::{Primitives, Primitive};
 use cgmath::{Matrix3, prelude::*, Point3};
 use wgpu::util::DeviceExt;
-use slotmap::SlotMap;
+use slotmap::{SlotMap, new_key_type};
+use std::collections::HashMap;
 
+// generates unique ID keys
+new_key_type! {
+    pub struct CameraId;
+    pub struct ModelId;
+    pub struct NodeId;
+}
 
 // scene represents "the what"
 pub struct Scene {
     pub nodes: SlotMap<NodeId, Node>,
-    pub assets: Vec<ModelAsset>,
+    pub assets: SlotMap<ModelId, ModelAsset>,
 
     pub cameras: SlotMap<CameraId, Camera>,
     pub active_camera: Option<CameraId>,
@@ -34,7 +42,7 @@ pub struct Scene {
 impl Scene {
     pub async fn new(gfx: &GraphicsContext<'_>, renderer: &Renderer) -> Self {
         let nodes = SlotMap::with_key();
-        let assets = Vec::new();
+        let assets = SlotMap::with_key();
         let cameras = SlotMap::with_key();
         let active_camera = None;
 
@@ -109,7 +117,7 @@ impl Scene {
         file_path: &str,
         gfx: &GraphicsContext<'_>,
         renderer: &Renderer
-    ) -> Option<usize> {
+    ) -> Option<ModelId> {
         // load raw mesh data
         match resources::load_model(
             file_path,
@@ -118,11 +126,10 @@ impl Scene {
             &renderer.texture_bind_group_layout
         ).await {
             Ok(model) => {
-        // wrap in asset container, creating empty instance buffer
-        let asset = ModelAsset::new(&gfx.device, model);
-        let id = self.assets.len();
-        self.assets.push(asset);
-                Some(id)
+                // wrap in asset container, creating empty instance buffer
+                let asset = ModelAsset::new(&gfx.device, model);
+                let id = self.assets.len();
+                Some(self.assets.insert(asset))
             },
             Err(e) => {
                 log::error!("Error loading model {}: {:?}", file_path, e);
@@ -131,10 +138,40 @@ impl Scene {
         }
     }
 
+    // loads a primitive object/model
+    pub fn load_primitive(
+        &mut self,
+        primitive: Primitive,
+        gfx: &GraphicsContext<'_>,
+        renderer: &Renderer,
+    ) -> ModelId {
+        self.load_primitive_colored(primitive, gfx, renderer, [1.0, 1.0, 1.0])
+    }
+
+    // loads a primitive object/model with a color
+    pub fn load_primitive_colored(
+        &mut self,
+        primitive: Primitive,
+        gfx: &GraphicsContext<'_>,
+        renderer: &Renderer,
+        color: [f32; 3],
+    ) -> ModelId {
+        let model = match primitive {
+            Primitive::Quad => {
+                Primitives::quad(&gfx.device, &gfx.queue, &renderer.texture_bind_group_layout, color)
+            }
+            Primitive::Cube => {
+                Primitives::cube(&gfx.device, &gfx.queue, &renderer.texture_bind_group_layout, color)
+            }
+        };
+
+        let asset = ModelAsset::new(&gfx.device, model);
+        let id = self.assets.len();
+        self.assets.insert(asset)
+    }
+
     // spawns a node into the world, returns ID handle
-    pub fn spawn_node(&mut self, model_id: Option<usize>, transform: Transform) -> NodeId {
-        let node_id = self.nodes.len();
-        let node = Node::new(model_id).with_transform(transform);
+    pub fn spawn_node(&mut self, node: Node) -> NodeId {
         self.nodes.insert(node)
     }
 
@@ -226,12 +263,15 @@ impl Scene {
         );
 
         // process nodes and instancing
-        for asset in &mut self.assets {
+        for (_, asset) in &mut self.assets {
             asset.instance_count = 0;
         }
 
         // create temporary buckets to hold the raw GPU data for each model
-        let mut instance_data = vec![Vec::new(); self.assets.len()];
+        let mut instance_data: HashMap<ModelId, Vec<InstanceRaw>> = HashMap::new();
+        for model_id in self.assets.keys() {
+            instance_data.insert(model_id, Vec::new());
+        }
 
         // calculate all global transforms first
         let mut global_transforms = Vec::with_capacity(self.nodes.len());
@@ -242,31 +282,39 @@ impl Scene {
         // apply global transforms to nodes
         for (id, global_matrix) in global_transforms {
             if let Some(node) = self.nodes.get_mut(id) {
-            node.global_transform = global_matrix;
+                node.global_transform = global_matrix;
 
-            // if the node has a model, convert it to bytes and bucket it
-            if let Some(model_id) = node.model_id {
-                let raw = InstanceRaw {
-                    model: node.global_transform.into(),
-                    normal: Matrix3::from(node.transform.rotation).into(),
-                };
-                instance_data[model_id].push(raw);
-                self.assets[model_id].instance_count += 1;
+                // if the node has a model, convert it to bytes and bucket it
+                if let Some(model_id) = node.model_id {
+                    let raw = InstanceRaw {
+                        model: node.global_transform.into(),
+                        normal: Matrix3::from(node.transform.rotation).into(),
+                        color: node.color,
+                    };
+
+                    if let Some(bucket) = instance_data.get_mut(&model_id) {
+                        bucket.push(raw);
+                    }
+                    if let Some(asset) = self.assets.get_mut(model_id) {
+                        asset.instance_count += 1;
+                    }
                 }
             }
         }
 
         // send the buckets to the wgpu buffers
-        for (i, asset) in self.assets.iter_mut().enumerate() {
+        for (model_id, asset) in self.assets.iter_mut() {
             if asset.instance_count > 0 {
                 // check if we need to allocate for more instances
                 asset.resize_buffer_if_needed(device, asset.instance_count);
 
-                queue.write_buffer(
-                    &asset.instance_buffer,
-                    0,
-                    bytemuck::cast_slice(&instance_data[i])
-                );
+                if let Some(bucket) = instance_data.get(&model_id) {
+                    queue.write_buffer(
+                        &asset.instance_buffer,
+                        0,
+                        bytemuck::cast_slice(bucket)
+                    );
+                }
             }
         }
     }
