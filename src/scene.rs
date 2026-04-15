@@ -35,6 +35,8 @@ pub struct Scene {
     pub light_buffer: wgpu::Buffer,
     pub light_bind_group: wgpu::BindGroup,
 
+    pub shadow_bind_group: wgpu::BindGroup,
+
     pub window_width: u32,
     pub window_height: u32,
 }
@@ -70,10 +72,31 @@ impl Scene {
             }
         );
 
+        let shadow_bind_group = gfx.device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &renderer.shadow_bind_group_layout,
+                entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&renderer.shadow_texture.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&renderer.shadow_texture.sampler),
+                        },
+                    ],
+                label: Some("camera_bind_group"),
+            }
+        );
+
         // add lighting
         let light_uniform = LightUniform::new(
-            [2.0, 3.0, 2.0],
+            [10.0, 9.0, -6.0],
             [1.0, 0.96, 0.89],
+            [-10.0, -9.0, 6.0],
+            // [-0.678844, -0.61096, 0.407307],
+            f32::cos(30.0_f32.to_radians()),
+            f32::cos(45.0_f32.to_radians()),
         );
 
         // use COPY_DST to update light's position
@@ -106,6 +129,7 @@ impl Scene {
             light_uniform,
             light_buffer,
             light_bind_group,
+            shadow_bind_group,
             window_width: gfx.config.width,
             window_height: gfx.config.height,
         }
@@ -248,13 +272,17 @@ impl Scene {
         };
 
         // update light
-        let old_position: cgmath::Vector3<_> = self.light_uniform.position.into();
-        self.light_uniform.position = (
-            cgmath::Quaternion::from_axis_angle(
-                (0.0, 1.0, 0.0).into(),
-                cgmath::Deg(60.0 * dt.as_secs_f32())
-            ) * old_position
-        ).into();
+        use cgmath::{Matrix4, Point3, Vector3, Rad};
+        let light_view_matrix = Matrix4::look_at_rh(
+            self.light_uniform.position.into(),
+            Point3::from(self.light_uniform.position) + Vector3::from(self.light_uniform.direction),
+            Vector3::unit_y()
+        );
+        let light_proj_matrix: Matrix4<f32> = cgmath::perspective(
+            Rad(self.light_uniform.outer_cutoff.acos() * 2.0),
+            1.0, 0.1, 1000.0
+        );
+        self.light_uniform.light_view_proj = (light_proj_matrix * light_view_matrix).into();
 
         queue.write_buffer(
             &self.light_buffer,
@@ -322,21 +350,36 @@ impl Scene {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-// represents a colored point in space
+// represents a colored spotlight
 pub struct LightUniform {
     pub position: [f32; 3],
-    _padding: u32,
+    _padding: f32,
     pub color: [f32; 3],
-    _padding2: u32,
+    _padding2: f32,
+    // normalized vector where light is shining
+    pub direction: [f32; 3],
+    // angles from the direction where brightness is 100% to 0% (in cosines)
+    pub inner_cutoff: f32,
+    pub outer_cutoff: f32,
+    _padding3: [f32; 3],
+    pub light_view_proj: [[f32; 4]; 4],
 }
 
 impl LightUniform {
-    pub fn new(position: [f32; 3], color: [f32; 3]) -> Self {
+    pub fn new(position: [f32; 3], color: [f32; 3], 
+        direction: [f32; 3], inner_cutoff: f32, outer_cutoff: f32
+    ) -> Self {
+
         Self {
             position,
-            _padding: 0,
+            _padding: 0.0,
             color,
-            _padding2: 0,
+            _padding2: 0.0,
+            direction,
+            inner_cutoff,
+            outer_cutoff,
+            _padding3: [0.0, 0.0, 0.0],
+            light_view_proj: [[0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0]],
         }
     }
 }

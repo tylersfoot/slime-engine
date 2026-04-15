@@ -1,6 +1,6 @@
 use crate::core::GraphicsContext;
 use crate::model::DrawLight;
-use crate::model::DrawModel;
+use crate::model::{DrawModel, DrawShadow};
 use crate::model::Vertex;
 use crate::scene::Scene;
 use crate::texture;
@@ -15,16 +15,24 @@ pub struct Renderer {
     // by bundling, the GPU can swap render pipelines insanely fast
     pub render_pipeline: wgpu::RenderPipeline,
     pub light_render_pipeline: wgpu::RenderPipeline,
+    pub shadow_render_pipeline: wgpu::RenderPipeline,
 
+    pub shadow_bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub light_bind_group_layout: wgpu::BindGroupLayout,
 
     pub depth_texture: texture::Texture,
+    pub shadow_texture: texture::Texture,
 }
 
 impl Renderer {
     pub fn new(gfx: &GraphicsContext) -> Self {
+
+        // create shadow mapping texture
+        let shadow_texture = texture::Texture::create_shadow_texture(
+            &gfx.device, &gfx.config, "shadow_texture", 4096
+        );
 
         // a bind group describes a set of resources and how they can be accessed by the shader
         // this is separate from the layout because it allows us to swap bind groups
@@ -67,6 +75,32 @@ impl Renderer {
                     }
                 ],
                 label: Some("texture_bind_group_layout"),
+            }
+        );
+
+        let shadow_bind_group_layout = gfx.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    // shadow texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Depth,
+                        },
+                        count: None,
+                    },
+                    // shadow sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                ],
+                label: Some("shadow_bind_group_layout"),
             }
         );
 
@@ -119,6 +153,7 @@ impl Renderer {
                 // a bind group is a way to group resources that a shader needs access to
                 // ex. a group for scene data, material-specific data
                 bind_group_layouts: &[
+                    Some(&shadow_bind_group_layout),
                     Some(&texture_bind_group_layout),
                     Some(&camera_bind_group_layout),
                     Some(&light_bind_group_layout),
@@ -141,6 +176,9 @@ impl Renderer {
                 true,
                 &[model::ModelVertex::desc(), crate::model::InstanceRaw::desc()],
                 shader,
+                true,
+                wgpu::DepthBiasState::default(),
+                wgpu::Face::Back,
                 Some("render_pipeline"),
             )
         };
@@ -167,17 +205,55 @@ impl Renderer {
                 true,
                 &[model::ModelVertex::desc()],
                 shader,
+                true,
+                wgpu::DepthBiasState::default(),
+                wgpu::Face::Back,
                 Some("light_render_pipeline"),
+            )
+        };
+
+        let shadow_render_pipeline = {
+            let layout = gfx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shadow_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&light_bind_group_layout)
+                ],
+                immediate_size: 0,
+            });
+            let shader = wgpu::ShaderModuleDescriptor {
+                label: Some("shadow_shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/shadow.wgsl").into()),
+            };
+            create_render_pipeline(
+                &gfx.device,
+                &layout,
+                gfx.config.format,
+                Some(texture::Texture::DEPTH_FORMAT),
+                wgpu::CompareFunction::Less,
+                true,
+                &[model::ModelVertex::desc(), crate::model::InstanceRaw::desc()],
+                shader,
+                false,
+                wgpu::DepthBiasState {
+                    constant: 0, // 2
+                    slope_scale: 1.5, // 2.0
+                    clamp: 0.0,
+                },
+                wgpu::Face::Front,
+                Some("shadow_render_pipeline"),
             )
         };
 
         Self {
             render_pipeline,
             light_render_pipeline,
+            shadow_render_pipeline,
+            shadow_bind_group_layout,
             texture_bind_group_layout,
             camera_bind_group_layout,
             light_bind_group_layout,
             depth_texture,
+            shadow_texture,
         }
     }
 
@@ -188,62 +264,97 @@ impl Renderer {
         );
     }
 
+    // draws the current frame
     pub fn render(
         &self,
         gfx: &GraphicsContext,
         scene: &Scene,
         view: &wgpu::TextureView,
     ) {
-        // draws the current frame
-
-        // create the CommandEncoder, which records a list of all commands to be sent to the GPU
-        let mut encoder = gfx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render_encoder"),
-        });
-
-        // begins a render pass, a block of drawing operations that target the same set of framebuffers/attachments
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("render_pass"),
-            // specifies where the final colors will be written
-            color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment {
-                    // attach the view of the frame texture
-                    view,
-                    resolve_target: None,
-                    // tells the GPU what to do with the attachment 
-                    // at the beginning (load) and end (store) of the pass
-                    ops: wgpu::Operations {
-                        // at the start, clear the texture to a background color
-                        load: wgpu::LoadOp::Clear(
-                            wgpu::Color {
-                                r: 0.0,
-                                g: 0.0,
-                                b: 0.0,
-                                a: 0.0,
-                            }
-                        ),
-                        // at the end, store the results into the texture
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })
-            ],
-            // attach depth texture to render objects in the right order
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_texture.view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            multiview_mask: None,
-            occlusion_query_set: None,
-        });
-
         // only draw if we have an active camera
         if scene.active_camera.is_some() {
+            // create the CommandEncoder, which records a list of all commands to be sent to the GPU
+            let mut encoder = gfx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render_encoder"),
+            });
+
+            // run an initial shadow render pass, with the depth texture set to shadow_texture
+            // and render all objects to save their depths to the shadow texture
+            let mut shadow_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow_render_pass"),
+                color_attachments: &[],
+                // attach depth texture to render objects in the right order
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                multiview_mask: None,
+                occlusion_query_set: None,
+            });
+
+            shadow_render_pass.set_pipeline(&self.shadow_render_pipeline);
+
+            for asset in scene.assets.values() {
+                if asset.instance_count > 0 {
+                    shadow_render_pass.set_vertex_buffer(1, asset.instance_buffer.slice(..));
+                    shadow_render_pass.draw_shadow_model_instanced(
+                        &asset.model,
+                        0..asset.instance_count,
+                        &scene.light_bind_group,
+                    );
+                }
+            }
+
+            drop(shadow_render_pass);
+
+
+            // begins a render pass, a block of drawing operations that target the same set of framebuffers/attachments
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("render_pass"),
+                // specifies where the final colors will be written
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        // attach the view of the frame texture
+                        view,
+                        resolve_target: None,
+                        // tells the GPU what to do with the attachment 
+                        // at the beginning (load) and end (store) of the pass
+                        ops: wgpu::Operations {
+                            // at the start, clear the texture to a background color
+                            load: wgpu::LoadOp::Clear(
+                                wgpu::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.0,
+                                }
+                            ),
+                            // at the end, store the results into the texture
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })
+                ],
+                // attach depth texture to render objects in the right order
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                multiview_mask: None,
+                occlusion_query_set: None,
+            });
+
+
             // draw light
             render_pass.set_pipeline(&self.light_render_pipeline);
 
@@ -272,17 +383,19 @@ impl Renderer {
                         0..asset.instance_count,
                         &scene.camera_bind_group,
                         &scene.light_bind_group,
+                        &scene.shadow_bind_group,
                     );
                 }
             }
-        }
-        
-        // drop render pass manually
-        drop(render_pass);
+            
+            // drop render pass manually
+            drop(render_pass);
 
-        // tell the encoder we are done recording and to package all commands into a command buffer
-        // submit the command buffer with all commands to the queue
-        gfx.queue.submit(Some(encoder.finish()));
+            // tell the encoder we are done recording and to package all commands into a command buffer
+            // submit the command buffer with all commands to the queue
+            gfx.queue.submit(Some(encoder.finish()));
+
+        }
     }
 }
 
@@ -296,25 +409,18 @@ fn create_render_pipeline(
     depth_write_enabled: bool,
     vertex_layouts: &[wgpu::VertexBufferLayout],
     shader: wgpu::ShaderModuleDescriptor,
+    has_fragment: bool,
+    depth_bias_state: wgpu::DepthBiasState,
+    cull_mode: wgpu::Face,
     label: Option<&str>,
 ) -> wgpu::RenderPipeline {
     // brings the shaders, data layout, and state settings together into a pipeline
     let shader = device.create_shader_module(shader);
-
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label,
-        layout: Some(layout),
-        // configures the vertex stage of the pipeline
-        vertex: wgpu::VertexState {
-            module: &shader,
-            // start at function 'vs_main' in the shader
-            entry_point: Some("vs_main"),
-            // tells the pipeline how the vertex buffer data is laid out
-            buffers: vertex_layouts,
-            compilation_options: Default::default(),
-        },
+    let fragment = if !has_fragment { 
+        None 
+    } else {
         // configures the fragment stage of the pipeline
-        fragment: Some(wgpu::FragmentState {
+        Some(wgpu::FragmentState {
             module: &shader,
             // start at function 'fs_main' in the shader
             entry_point: Some("fs_main"),
@@ -335,14 +441,29 @@ fn create_render_pipeline(
                 })
             ],
             compilation_options: Default::default(),
-        }),
+        })
+    };
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label,
+        layout: Some(layout),
+        // configures the vertex stage of the pipeline
+        vertex: wgpu::VertexState {
+            module: &shader,
+            // start at function 'vs_main' in the shader
+            entry_point: Some("vs_main"),
+            // tells the pipeline how the vertex buffer data is laid out
+            buffers: vertex_layouts,
+            compilation_options: Default::default(),
+        },
+        fragment,
         // tells the GPU's rasterizer stage how to interpret the vertex data
         primitive: wgpu::PrimitiveState {
             // take buffer vertices 3 at a time as a list of independent triangles
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw, // winding rotation
-            cull_mode: Some(wgpu::Face::Back), // dont render triangles facing away
+            cull_mode: Some(cull_mode), // dont render triangles facing away
             // how to fill the triangles
             // Fill: color whole triangle
             // Line: wireframe
@@ -368,7 +489,7 @@ fn create_render_pipeline(
             // Greater, NotEqual, GreaterEqual, Always
             depth_compare: Some(depth_compare),
             stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
+            bias: depth_bias_state,
         }),
         // configures Multi-Sample Anti-Aliasing (MSAA)
         multisample: wgpu::MultisampleState {
