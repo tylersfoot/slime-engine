@@ -7,6 +7,9 @@ use image::GenericImageView;
 pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
 use cgmath::prelude::*;
 use std::time::{Duration, Instant};
+pub use pollster;
+pub use env_logger;
+pub use cgmath;
 
 pub mod window;
 pub mod core;
@@ -24,7 +27,7 @@ use crate::window::Window;
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
 use crate::scene::Scene;
-use crate::transform::Transform;
+use crate::transform::Transform3D;
 
 // a struct to hold real-time debug information
 struct DebugInfo {

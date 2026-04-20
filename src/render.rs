@@ -7,7 +7,6 @@ use crate::texture;
 use crate::model;
 
 
-// renderer represents "the how"
 pub struct Renderer {
     // pipeline: complete, pre-configured state object that defines how to draw
     // bundles: vertex/fragment shader, vertex data layout, type of primitive (tri),

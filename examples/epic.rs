@@ -3,16 +3,18 @@ use cgmath::{num_traits::float, prelude::*, Quaternion, Rotation3, Rad, Euler, D
 use slime_engine::{
     App,
     Engine,
-    transform::Transform, 
+    transform::Transform3D, 
     window::Window,
     WindowOptions,
-    node::Node,
+    node::Node3D,
     primitives::{Primitives, Primitive},
     model::ModelAsset,
-    scene::{NodeId, ModelId, CameraId},
+    scene::{Node3DId, ModelId, CameraId},
+    Key,
+    pollster::block_on,
+    env_logger,
 };
 use std::time::Duration;
-use pollster::block_on;
 
 fn rand_color() -> [f32; 4] {
     [rand::random(), rand::random(), rand::random(), 1.0]
@@ -20,9 +22,9 @@ fn rand_color() -> [f32; 4] {
 
 struct EpicGame {
     time_passed: f32,
-    moving_cube_id: Option<NodeId>,
-    floating_platform_id: Option<NodeId>,
-    crazycorn_id: Option<NodeId>,
+    moving_cube_id: Option<Node3DId>,
+    floating_platform_id: Option<Node3DId>,
+    crazycorn_id: Option<Node3DId>,
     camera: Option<CameraId>,
     camera2: Option<CameraId>,
 }
@@ -49,8 +51,8 @@ impl App for EpicGame {
 
         // moving cube
         let moving_cube_id = engine.scene.spawn_node(
-            Node::new(Some(cube_model)).with_transform(
-                Transform::new()
+            Node3D::new(Some(cube_model)).with_transform(
+                Transform3D::new()
                     .with_position([0.0, 20.0, -5.0])
                     .with_scale([2.0, 2.0, 2.0])
                 ).with_color(rand_color())
@@ -66,8 +68,8 @@ impl App for EpicGame {
                 let x = (i as f32 - (grid_size as f32) / 2.0 + 0.5) * tile_size;
                 let z = (j as f32 - (grid_size as f32) / 2.0 + 0.5) * tile_size;
                 engine.scene.spawn_node(
-                    Node::new(Some(cube_model)).with_transform(
-                        Transform::new()
+                    Node3D::new(Some(cube_model)).with_transform(
+                        Transform3D::new()
                             .with_position([x, floor_y, z])
                             .with_scale([tile_size, 2.0, tile_size])
                     ).with_color(rand_color())
@@ -85,8 +87,8 @@ impl App for EpicGame {
                 // height wobbles so it's not all uniform
                 let h = 1.0 + ((i as f32 * 0.5).sin() + (j as f32 * 0.5).cos()).abs() * 3.0;
                 engine.scene.spawn_node(
-                    Node::new(Some(cube_model)).with_transform(
-                        Transform::new()
+                    Node3D::new(Some(cube_model)).with_transform(
+                        Transform3D::new()
                             .with_position([x, floor_y + h / 2.0, z])
                             .with_scale([1.0, h, 1.0])
                     ).with_color(rand_color())
@@ -96,8 +98,8 @@ impl App for EpicGame {
 
         // floating tilted platform
         let floating_platform_id = engine.scene.spawn_node(
-            Node::new(Some(cube_model)).with_transform(
-                Transform::new()
+            Node3D::new(Some(cube_model)).with_transform(
+                Transform3D::new()
                     .with_position([0.0, 20.0, -5.0])
                     .with_rotation(Quaternion::from(Euler::new(Deg(30.0), Deg(45.0), Deg(0.0))))
                     .with_scale([3.0, 0.2, 3.0])
@@ -113,8 +115,8 @@ impl App for EpicGame {
             let z = angle.sin() * radius - 5.0;
             let size = 0.5 + (k as f32 * 0.2);
             engine.scene.spawn_node(
-                Node::new(Some(cube_model)).with_transform(
-                Transform::new()
+                Node3D::new(Some(cube_model)).with_transform(
+                Transform3D::new()
                     .with_position([x, 10.0, z])
                     .with_rotation(Quaternion::from(Euler::new(
                         Deg(k as f32 * 12.0),
@@ -126,8 +128,8 @@ impl App for EpicGame {
         }
 
         let crazycorn_id = engine.scene.spawn_node(
-            Node::new(Some(crazycorn_model)).with_transform(
-                Transform::new()
+            Node3D::new(Some(crazycorn_model)).with_transform(
+                Transform3D::new()
                     .with_position([30.0, 0.0, 0.0])
                     .with_scale([0.02, 0.02, 0.02])
             )
@@ -138,7 +140,7 @@ impl App for EpicGame {
 
     fn update(&mut self, engine: &mut Engine, dt: Duration) {
         if let Some(camera) = self.camera && let Some(camera2) = self.camera2 {
-            if engine.gfx.window.is_key_down(minifb::Key::C) {
+            if engine.gfx.window.is_key_down(Key::C) {
                 engine.scene.set_active_camera(camera2);
             } else {
                 engine.scene.set_active_camera(camera);
@@ -176,7 +178,7 @@ impl App for EpicGame {
                 * Quaternion::from_angle_z(Rad(120.0_f32.to_radians() * delta));
             let new_rotation = node.transform.rotation * spin;
 
-            node.transform = Transform::new()
+            node.transform = Transform3D::new()
                 .with_position([
                     5.0,
                     5.0 + (self.time_passed * 4.0).sin() * scale * 5.0,

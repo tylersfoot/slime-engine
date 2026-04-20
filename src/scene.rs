@@ -4,8 +4,8 @@ use crate::camera::{Camera, CameraUniform, CameraController, Projection};
 use crate::model::{ModelAsset, InstanceRaw, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelVertex};
 use crate::texture::{Texture};
 use crate::resources;
-use crate::transform::Transform;
-use crate::node::Node;
+use crate::transform::Transform3D;
+use crate::node::Node3D;
 use crate::primitives::{Primitives, Primitive};
 use cgmath::{Matrix3, prelude::*, Point3};
 use wgpu::util::DeviceExt;
@@ -16,12 +16,12 @@ use std::collections::HashMap;
 new_key_type! {
     pub struct CameraId;
     pub struct ModelId;
-    pub struct NodeId;
+    pub struct Node3DId;
+    pub struct Node2DId;
 }
 
-// scene represents "the what"
 pub struct Scene {
-    pub nodes: SlotMap<NodeId, Node>,
+    pub nodes: SlotMap<Node3DId, Node3D>,
     pub assets: SlotMap<ModelId, ModelAsset>,
 
     pub cameras: SlotMap<CameraId, Camera>,
@@ -195,7 +195,7 @@ impl Scene {
     }
 
     // spawns a node into the world, returns ID handle
-    pub fn spawn_node(&mut self, node: Node) -> NodeId {
+    pub fn spawn_node(&mut self, node: Node3D) -> Node3DId {
         self.nodes.insert(node)
     }
 
@@ -225,7 +225,7 @@ impl Scene {
         }
     }
 
-    pub fn get_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
+    pub fn get_global_transform(&self, node_id: Node3DId) -> cgmath::Matrix4<f32> {
         // recursively calculates the world transform 
         // of a node by walking up the parent chain
         let mut transform = cgmath::Matrix4::identity();

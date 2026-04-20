@@ -1,10 +1,10 @@
-use crate::transform::Transform;
+use crate::transform::Transform3D;
 use cgmath::{Matrix4};
-use crate::scene::{NodeId, ModelId};
+use crate::scene::{Node3DId, ModelId};
 
-pub struct Node {
+pub struct Node3D {
     // local transform relative to parent
-    pub transform: Transform,
+    pub transform: Transform3D,
     // world transform matrix after walking up node tree
     pub global_transform: Matrix4<f32>,
     // optional model ID to draw
@@ -12,15 +12,15 @@ pub struct Node {
     // color tint to this node's instance
     pub color: [f32; 4],
     // optional index of the parent node
-    pub parent: Option<NodeId>,
+    pub parent: Option<Node3DId>,
     // indices of child nodes
-    pub children: Vec<NodeId>,
+    pub children: Vec<Node3DId>,
 }
 
-impl Node {
+impl Node3D {
     pub fn new(model_id: Option<ModelId>) -> Self {
         Self {
-            transform: Transform::new(),
+            transform: Transform3D::new(),
             global_transform: Matrix4::from_scale(1.0),
             model_id,
             color: [1.0, 1.0, 1.0, 1.0],
@@ -29,7 +29,7 @@ impl Node {
         }
     }
 
-    pub fn with_transform(mut self, transform: Transform) -> Self {
+    pub fn with_transform(mut self, transform: Transform3D) -> Self {
         self.transform = transform;
         self
     }
