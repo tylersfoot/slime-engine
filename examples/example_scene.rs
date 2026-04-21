@@ -9,7 +9,7 @@ use slime_engine::{
     node::Node3D,
     primitives::{Primitives, Primitive},
     model::ModelAsset,
-    scene::{Node3DId, ModelId, CameraId},
+    scene::{NodeId, ModelId, CameraId},
     Key,
     pollster::block_on,
     env_logger,
@@ -22,9 +22,9 @@ fn rand_color() -> [f32; 4] {
 
 struct EpicGame {
     time_passed: f32,
-    moving_cube_id: Option<Node3DId>,
-    floating_platform_id: Option<Node3DId>,
-    crazycorn_id: Option<Node3DId>,
+    moving_cube_id: Option<NodeId>,
+    floating_platform_id: Option<NodeId>,
+    crazycorn_id: Option<NodeId>,
     camera: Option<CameraId>,
     camera2: Option<CameraId>,
 }

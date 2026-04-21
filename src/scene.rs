@@ -1,11 +1,12 @@
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
-use crate::camera::{Camera, CameraUniform, CameraController, Projection};
-use crate::model::{ModelAsset, InstanceRaw, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelVertex};
+use crate::camera::{Camera3D, Camera2D, CameraUniform3D, CameraUniform2D,
+    Projection3D, Projection2D, CameraController};
+use crate::model::{InstanceRaw2D, InstanceRaw3D, Material, MaterialTextures, MaterialUniforms, Mesh, Model, ModelAsset, ModelVertex, Vertex2D};
 use crate::texture::{Texture};
 use crate::resources;
-use crate::transform::Transform3D;
-use crate::node::Node3D;
+use crate::transform::{Transform3D, Transform2D};
+use crate::node::{Node3D, Node2D};
 use crate::primitives::{Primitives, Primitive};
 use cgmath::{Matrix3, prelude::*, Point3};
 use wgpu::util::DeviceExt;
@@ -16,18 +17,18 @@ use std::collections::HashMap;
 new_key_type! {
     pub struct CameraId;
     pub struct ModelId;
-    pub struct Node3DId;
-    pub struct Node2DId;
+    pub struct TextureId;
+    pub struct NodeId;
 }
 
 pub struct Scene {
-    pub nodes: SlotMap<Node3DId, Node3D>,
+    pub nodes: SlotMap<NodeId, Node3D>,
     pub assets: SlotMap<ModelId, ModelAsset>,
 
-    pub cameras: SlotMap<CameraId, Camera>,
+    pub cameras: SlotMap<CameraId, Camera3D>,
     pub active_camera: Option<CameraId>,
     pub camera_controller: CameraController,
-    pub camera_uniform: CameraUniform,
+    pub camera_uniform: CameraUniform3D,
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
 
@@ -51,7 +52,7 @@ impl Scene {
         let camera_controller = CameraController::new(2.0, 0.4);
  
         // create camera uniform so we can use our camera data in shaders
-        let mut camera_uniform = CameraUniform::new();
+        let mut camera_uniform = CameraUniform3D::new();
             
         let camera_buffer = gfx.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -195,12 +196,12 @@ impl Scene {
     }
 
     // spawns a node into the world, returns ID handle
-    pub fn spawn_node(&mut self, node: Node3D) -> Node3DId {
+    pub fn spawn_node(&mut self, node: Node3D) -> NodeId {
         self.nodes.insert(node)
     }
 
     pub fn spawn_camera<V: Into<Point3<f32>>>(&mut self, position: V, yaw_deg: f32, pitch_deg: f32) -> CameraId {
-        let camera = Camera::new(
+        let camera = Camera3D::new(
             position,
             cgmath::Deg(yaw_deg),
             cgmath::Deg(pitch_deg),
@@ -225,7 +226,7 @@ impl Scene {
         }
     }
 
-    pub fn get_global_transform(&self, node_id: Node3DId) -> cgmath::Matrix4<f32> {
+    pub fn get_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
         // recursively calculates the world transform 
         // of a node by walking up the parent chain
         let mut transform = cgmath::Matrix4::identity();
@@ -296,7 +297,7 @@ impl Scene {
         }
 
         // create temporary buckets to hold the raw GPU data for each model
-        let mut instance_data: HashMap<ModelId, Vec<InstanceRaw>> = HashMap::new();
+        let mut instance_data: HashMap<ModelId, Vec<InstanceRaw3D>> = HashMap::new();
         for model_id in self.assets.keys() {
             instance_data.insert(model_id, Vec::new());
         }
@@ -314,7 +315,7 @@ impl Scene {
 
                 // if the node has a model, convert it to bytes and bucket it
                 if let Some(model_id) = node.model_id {
-                    let raw = InstanceRaw {
+                    let raw = InstanceRaw3D {
                         model: node.global_transform.into(),
                         normal: Matrix3::from(node.transform.rotation).into(),
                         color: node.color,
@@ -344,6 +345,207 @@ impl Scene {
                     );
                 }
             }
+        }
+    }
+}
+
+// basically a 2D scene
+pub struct Canvas {
+    pub nodes: SlotMap<NodeId, Node2D>,
+
+    pub camera: Camera2D,
+    pub camera_uniform: CameraUniform2D,
+    pub camera_buffer: wgpu::Buffer,
+    pub camera_bind_group: wgpu::BindGroup,
+
+    pub quad_vertex_buffer: wgpu::Buffer,
+    pub quad_index_buffer: wgpu::Buffer,
+    pub quad_num_elements: u32,
+
+    pub instance_buffer: wgpu::Buffer,
+    pub instance_count: u32,
+    pub instance_capacity: u32,
+
+    pub window_width: u32,
+    pub window_height: u32,
+}
+
+impl Canvas {
+    pub fn new(gfx: &GraphicsContext<'_>, renderer: &Renderer) -> Self {
+        let nodes = SlotMap::with_key();
+
+        let camera = Camera2D::new(gfx.config.width as f32, gfx.config.height as f32, 1.0);
+        let mut camera_uniform = CameraUniform2D::new();
+            
+        let camera_buffer = gfx.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("camera_buffer"),
+                contents: bytemuck::cast_slice(&[camera_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+        let camera_bind_group = gfx.device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &renderer.camera_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                }],
+                label: Some("camera_bind_group"),
+            }
+        );
+
+        // create one-time quad data to use for all nodes
+
+        const QUAD_VERTICES: &[Vertex2D] = &[
+            Vertex2D { position: [-0.5,  0.5], tex_coords: [0.0, 0.0] }, // top left
+            Vertex2D { position: [-0.5, -0.5], tex_coords: [0.0, 1.0] }, // bottom left
+            Vertex2D { position:  [0.5, -0.5], tex_coords: [1.0, 1.0] }, // bottom right
+            Vertex2D { position:  [0.5,  0.5], tex_coords: [1.0, 0.0] }, // top right
+        ];
+
+        const QUAD_INDICES: &[u16] = &[
+            0, 1, 2, // bottom left
+            0, 2, 3, // top right
+        ];
+
+        let quad_vertex_buffer = gfx.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("quad_vertex_buffer"),
+                contents: bytemuck::cast_slice(QUAD_VERTICES),
+                usage: wgpu::BufferUsages::VERTEX,
+            }
+        );
+
+        let quad_index_buffer = gfx.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("quad_index_buffer"),
+                contents: bytemuck::cast_slice(QUAD_INDICES),
+                usage: wgpu::BufferUsages::INDEX,
+            }
+        );
+
+        let quad_num_elements = QUAD_INDICES.len() as u32;
+
+        let instance_capacity = 10;
+        let instance_buffer = gfx.device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("canvas_instance_buffer"),
+                size: (std::mem::size_of::<InstanceRaw2D>() as u32 * instance_capacity) as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        );
+
+        Self {
+            nodes,
+            camera,
+            camera_uniform,
+            camera_buffer,
+            camera_bind_group,
+            quad_vertex_buffer,
+            quad_index_buffer,
+            quad_num_elements,
+            instance_buffer,
+            instance_capacity,
+            instance_count: 0,
+            window_width: gfx.config.width,
+            window_height: gfx.config.height,
+        }
+    }
+
+    pub fn get_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
+        // recursively calculates the world transform 
+        // of a node by walking up the parent chain
+        let mut transform = cgmath::Matrix4::identity();
+
+        if let Some(node) = self.nodes.get(node_id) {
+            // get this node's local matrix
+            transform = node.transform.calc_matrix();
+            let mut current_parent = node.parent;
+
+            // loop up the heirarchy, multiplying transforms
+            while let Some(parent_id) = current_parent {
+                if let Some(parent_node) = self.nodes.get(parent_id) {
+                    transform = parent_node.transform.calc_matrix()  * transform;
+                    current_parent = parent_node.parent;
+                } else {
+                    break; // parent not found
+                }
+            }
+        }
+        transform
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.window_width = width;
+        self.window_height = height;
+        self.camera.projection.resize(width, height);
+    }
+
+    pub fn update(&mut self, dt: std::time::Duration, device: &wgpu::Device, queue: &wgpu::Queue) {
+        // update camera
+        self.camera_uniform.update_view_proj(&self.camera, &self.camera.projection);
+        
+        queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+
+
+        // calculate all global transforms first
+        let mut global_transforms = Vec::with_capacity(self.nodes.len());
+        for (id, _) in self.nodes.iter() {
+            global_transforms.push((id, self.get_global_transform(id)));
+        }
+
+        // store z_index, global matrix, color to sort later
+        let mut render_data: Vec<(i32, cgmath::Matrix4<f32>, [f32; 4])> = Vec::new();
+        for (id, global_matrix) in global_transforms {
+            if let Some(node) = self.nodes.get_mut(id) {
+                node.global_transform = global_matrix;
+                render_data.push((
+                    node.z_index,
+                    global_matrix,
+                    node.color
+                ));
+            }
+        }
+
+        // order by z_index
+        render_data.sort_by_key(|i| i.0);
+
+        let mut instances: Vec<InstanceRaw2D> = render_data.into_iter().map(
+            |node|
+            InstanceRaw2D {
+               model: node.1.into(),
+               color: node.2 
+            }
+        ).collect();
+
+        self.instance_count = instances.len() as u32;
+
+        if self.instance_count > 0 {
+            // check if the instance buffer needs a higher capacity
+            if self.instance_count > self.instance_capacity {
+                self.instance_capacity = (self.instance_capacity * 2).max(self.instance_count).max(64);
+                self.instance_buffer = device.create_buffer(
+                    &wgpu::BufferDescriptor {
+                        label: Some("canvas_instance_buffer"),
+                        size: (std::mem::size_of::<InstanceRaw2D>() as u32 * self.instance_capacity) as wgpu::BufferAddress,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }
+                );
+            }
+
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&instances)
+            );
         }
     }
 }

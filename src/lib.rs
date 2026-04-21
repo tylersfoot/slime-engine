@@ -26,7 +26,7 @@ pub mod primitives;
 use crate::window::Window;
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
-use crate::scene::Scene;
+use crate::scene::{Scene, Canvas};
 use crate::transform::Transform3D;
 
 // a struct to hold real-time debug information
@@ -76,6 +76,7 @@ pub struct Engine<'a> {
     pub gfx: GraphicsContext<'a>,
     pub renderer: Renderer,
     pub scene: Scene,
+    pub canvas: Canvas,
 
     debug: DebugInfo,
     window_active: bool,
@@ -90,12 +91,14 @@ impl Engine<'_> {
         let renderer = Renderer::new(&gfx);
 
         // build the scene (for camera, lights, models)
-        let mut scene = Scene::new(&gfx, &renderer).await;
+        let scene = Scene::new(&gfx, &renderer).await;
+        let canvas = Canvas::new(&gfx, &renderer);
 
         let mut engine = Engine {
             gfx,
             renderer,
             scene,
+            canvas,
             debug: DebugInfo::new(),
             window_active: false,
         };
@@ -142,7 +145,7 @@ impl Engine<'_> {
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // delegate drawing to renderer
-        self.renderer.render(&self.gfx, &self.scene, &view);
+        self.renderer.render(&self.gfx, &self.scene, &self.canvas, &view);
 
         // tell the swap chain we're done drawing this frame, ready to be presented to the screen
         frame.present();
@@ -155,6 +158,7 @@ impl Engine<'_> {
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.scene.resize(width, height);
+        self.canvas.resize(width,height);
         self.gfx.configure_surface(width, height);
         self.renderer.resize(&self.gfx);
     }
@@ -227,6 +231,7 @@ impl Engine<'_> {
 
             // update internal engine states
             self.scene.update(dt, &self.gfx.device, &self.gfx.queue);
+            self.canvas.update(dt, &self.gfx.device, &self.gfx.queue);
 
             if !self.gfx.window.is_open() {
                 return; // exit if window is closed

@@ -9,16 +9,16 @@ pub trait Vertex {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 // the raw data of the instance to pass to the GPU
-pub struct InstanceRaw {
+pub struct InstanceRaw3D {
     pub model: [[f32; 4]; 4],
     pub normal: [[f32; 3]; 3],
     pub color: [f32; 4],
 }
  
-impl InstanceRaw {
+impl InstanceRaw3D {
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<InstanceRaw3D>() as wgpu::BufferAddress,
             // we use a step mode of Instance, where our shaders will only change 
             // to use the next instance when the shader starts processing a new instance
             step_mode: wgpu::VertexStepMode::Instance,
@@ -66,6 +66,82 @@ impl InstanceRaw {
                     offset: std::mem::size_of::<[f32; 25]>() as wgpu::BufferAddress,
                     shader_location: 12,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceRaw2D {
+    pub model: [[f32; 4]; 4],
+    pub color: [f32; 4],
+}
+ 
+impl InstanceRaw2D {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceRaw2D>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                // model: 4 Vec4's
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                // color: Vec4
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex2D {
+    pub position: [f32; 2],
+    pub tex_coords: [f32; 2],
+}
+
+impl Vertex2D {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex2D>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                // position
+                wgpu::VertexAttribute {
+                    offset: 0, // starts at byte 0
+                    shader_location: 0, // will be available in the shader at @location(0)
+                    format: wgpu::VertexFormat::Float32x2, // two 32-bit floats
+                },
+                // texture coordinates
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
                 },
             ],
         }
@@ -346,7 +422,7 @@ impl ModelAsset {
         let instance_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("model_instance_buffer"),
-                size: (std::mem::size_of::<InstanceRaw>() * capacity) as wgpu::BufferAddress,
+                size: (std::mem::size_of::<InstanceRaw3D>() * capacity) as wgpu::BufferAddress,
                 // COPY_DST so we can write to the buffer every frame
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
@@ -376,7 +452,7 @@ impl ModelAsset {
             self.instance_buffer = device.create_buffer(
                 &wgpu::BufferDescriptor {
                     label: Some("model_instance_buffer"),
-                    size: (std::mem::size_of::<InstanceRaw>() as u32 * new_capacity) as wgpu::BufferAddress,
+                    size: (std::mem::size_of::<InstanceRaw3D>() as u32 * new_capacity) as wgpu::BufferAddress,
                     // COPY_DST so we can write to the buffer every frame
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,

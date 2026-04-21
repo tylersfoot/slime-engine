@@ -1,8 +1,8 @@
 use crate::core::GraphicsContext;
-use crate::model::DrawLight;
+use crate::model::{DrawLight, InstanceRaw2D, InstanceRaw3D, ModelVertex, Vertex2D};
 use crate::model::{DrawModel, DrawShadow};
 use crate::model::Vertex;
-use crate::scene::Scene;
+use crate::scene::{Canvas, Scene};
 use crate::texture;
 use crate::model;
 
@@ -13,6 +13,7 @@ pub struct Renderer {
     // settings for depth testing, color blending, etc.
     // by bundling, the GPU can swap render pipelines insanely fast
     pub render_pipeline: wgpu::RenderPipeline,
+    pub render_pipeline_2d: wgpu::RenderPipeline,
     pub light_render_pipeline: wgpu::RenderPipeline,
     pub shadow_render_pipeline: wgpu::RenderPipeline,
 
@@ -163,7 +164,7 @@ impl Renderer {
 
         let render_pipeline = {
             let shader = wgpu::ShaderModuleDescriptor {
-                label: Some("normal_shader"),
+                label: Some("render_shader"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/shader.wgsl").into()),
             };
             create_render_pipeline(
@@ -173,11 +174,43 @@ impl Renderer {
                 Some(texture::Texture::DEPTH_FORMAT),
                 wgpu::CompareFunction::Less,
                 true,
-                &[model::ModelVertex::desc(), crate::model::InstanceRaw::desc()],
+                &[ModelVertex::desc(), InstanceRaw3D::desc()],
                 shader,
                 true,
                 wgpu::DepthBiasState::default(),
-                wgpu::Face::Back,
+                Some(wgpu::Face::Back),
+                wgpu::BlendState::REPLACE,
+                Some("render_pipeline"),
+            )
+        };
+
+        let render_pipeline_2d_layout =
+            gfx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("render_pipeline_2d_layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+
+        let render_pipeline_2d = {
+            let shader = wgpu::ShaderModuleDescriptor {
+                label: Some("render_2d_shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/shader2d.wgsl").into()),
+            };
+            create_render_pipeline(
+                &gfx.device,
+                &render_pipeline_2d_layout,
+                gfx.config.format,
+                None, // no depth, determined by draw order
+                wgpu::CompareFunction::Less,
+                true,
+                &[Vertex2D::desc(), InstanceRaw2D::desc()],
+                shader,
+                true,
+                wgpu::DepthBiasState::default(),
+                Some(wgpu::Face::Front),
+                wgpu::BlendState::ALPHA_BLENDING,
                 Some("render_pipeline"),
             )
         };
@@ -202,11 +235,12 @@ impl Renderer {
                 Some(texture::Texture::DEPTH_FORMAT),
                 wgpu::CompareFunction::Less,
                 true,
-                &[model::ModelVertex::desc()],
+                &[ModelVertex::desc()],
                 shader,
                 true,
                 wgpu::DepthBiasState::default(),
-                wgpu::Face::Back,
+                Some(wgpu::Face::Back),
+                wgpu::BlendState::REPLACE,
                 Some("light_render_pipeline"),
             )
         };
@@ -230,7 +264,7 @@ impl Renderer {
                 Some(texture::Texture::DEPTH_FORMAT),
                 wgpu::CompareFunction::Less,
                 true,
-                &[model::ModelVertex::desc(), crate::model::InstanceRaw::desc()],
+                &[ModelVertex::desc(), InstanceRaw3D::desc()],
                 shader,
                 false,
                 wgpu::DepthBiasState {
@@ -238,13 +272,15 @@ impl Renderer {
                     slope_scale: 1.5, // 2.0
                     clamp: 0.0,
                 },
-                wgpu::Face::Front,
+                Some(wgpu::Face::Front),
+                wgpu::BlendState::REPLACE,
                 Some("shadow_render_pipeline"),
             )
         };
 
         Self {
             render_pipeline,
+            render_pipeline_2d,
             light_render_pipeline,
             shadow_render_pipeline,
             shadow_bind_group_layout,
@@ -268,15 +304,16 @@ impl Renderer {
         &self,
         gfx: &GraphicsContext,
         scene: &Scene,
+        canvas: &Canvas,
         view: &wgpu::TextureView,
     ) {
-        // only draw if we have an active camera
-        if scene.active_camera.is_some() {
-            // create the CommandEncoder, which records a list of all commands to be sent to the GPU
-            let mut encoder = gfx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render_encoder"),
-            });
+        // create the CommandEncoder, which records a list of all commands to be sent to the GPU
+        let mut encoder = gfx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render_encoder"),
+        });
 
+        // only draw scene if we have an active camera
+        if scene.active_camera.is_some() {
             // run an initial shadow render pass, with the depth texture set to shadow_texture
             // and render all objects to save their depths to the shadow texture
             let mut shadow_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -310,7 +347,6 @@ impl Renderer {
             }
 
             drop(shadow_render_pass);
-
 
             // begins a render pass, a block of drawing operations that target the same set of framebuffers/attachments
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -389,12 +425,48 @@ impl Renderer {
             
             // drop render pass manually
             drop(render_pass);
-
-            // tell the encoder we are done recording and to package all commands into a command buffer
-            // submit the command buffer with all commands to the queue
-            gfx.queue.submit(Some(encoder.finish()));
-
         }
+
+        // 2D render pass
+        if canvas.instance_count > 0 {
+            let mut render_pass_2d = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("render_pass_2d"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // load 3D scene instead of overwriting to BG color
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass_2d.set_pipeline(&self.render_pipeline_2d);
+            render_pass_2d.set_bind_group(0, &canvas.camera_bind_group, &[]);
+            
+            // bind quad & instances
+            render_pass_2d.set_vertex_buffer(0, canvas.quad_vertex_buffer.slice(..));
+            render_pass_2d.set_vertex_buffer(1, canvas.instance_buffer.slice(..));
+            render_pass_2d.set_index_buffer(canvas.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
+            render_pass_2d.draw_indexed(0..canvas.quad_num_elements, 0, 0..canvas.instance_count);
+            
+            drop(render_pass_2d);
+        }
+
+        // tell the encoder we are done recording and to package all commands into a command buffer
+        // submit the command buffer with all commands to the queue
+        gfx.queue.submit(Some(encoder.finish()));
+
+
     }
 }
 
@@ -410,7 +482,8 @@ fn create_render_pipeline(
     shader: wgpu::ShaderModuleDescriptor,
     has_fragment: bool,
     depth_bias_state: wgpu::DepthBiasState,
-    cull_mode: wgpu::Face,
+    cull_mode: Option<wgpu::Face>,
+    blend_state: wgpu::BlendState,
     label: Option<&str>,
 ) -> wgpu::RenderPipeline {
     // brings the shaders, data layout, and state settings together into a pipeline
@@ -431,10 +504,7 @@ fn create_render_pipeline(
                     format: color_format,
                     // REPLACE: when the shader outputs a color, replace the previous color
                     // ALPHABLENDING: combine new color with old color based on transparency 
-                    blend: Some(wgpu::BlendState {
-                        alpha: wgpu::BlendComponent::REPLACE,
-                        color: wgpu::BlendComponent::REPLACE,
-                    }),
+                    blend: Some(blend_state),
                     // can write to all color channels (rgba)
                     write_mask: wgpu::ColorWrites::ALL,
                 })
@@ -462,7 +532,7 @@ fn create_render_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw, // winding rotation
-            cull_mode: Some(cull_mode), // dont render triangles facing away
+            cull_mode, // which side (if any) of the triangle to render
             // how to fill the triangles
             // Fill: color whole triangle
             // Line: wireframe
