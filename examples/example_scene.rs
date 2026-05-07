@@ -1,5 +1,4 @@
-#![allow(unused)]
-use cgmath::{num_traits::float, prelude::*, Quaternion, Rotation3, Rad, Euler, Deg};
+use cgmath::{Quaternion, Rotation3, Rad, Euler, Deg};
 use slime_engine::{
     App,
     Engine,
@@ -7,9 +6,8 @@ use slime_engine::{
     window::Window,
     WindowOptions,
     node::Node3D,
-    primitives::{Primitives, Primitive},
-    model::ModelAsset,
-    scene::{NodeId, ModelId, CameraId},
+    primitives::Primitive,
+    scene::{NodeId, CameraId},
     Key,
     pollster::block_on,
     env_logger,
@@ -20,7 +18,7 @@ fn rand_color() -> [f32; 4] {
     [rand::random(), rand::random(), rand::random(), 1.0]
 }
 
-struct EpicGame {
+struct ExampleScene {
     time_passed: f32,
     moving_cube_id: Option<NodeId>,
     floating_platform_id: Option<NodeId>,
@@ -29,7 +27,7 @@ struct EpicGame {
     camera2: Option<CameraId>,
 }
 
-impl App for EpicGame {
+impl App for ExampleScene {
     fn start(&mut self, engine: &mut Engine) {
         let camera = engine.scene.spawn_camera(
             [0.0, 5.0, 10.0],
@@ -45,7 +43,6 @@ impl App for EpicGame {
         );
         self.camera2 = Some(camera2);
 
-        // let cube_model_id = block_on(engine.scene.load_model("unit_cube.obj", &engine.gfx, &engine.renderer)).unwrap();
         let cube_model = engine.scene.load_primitive(Primitive::Cube, &engine.gfx, &engine.renderer);
         let crazycorn_model = block_on(engine.scene.load_model("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer)).unwrap();
 
@@ -107,13 +104,12 @@ impl App for EpicGame {
         );
         self.floating_platform_id = Some(floating_platform_id);
 
-        // ring of scattered cubes with varying rotation/size
+        // ring of scattered cubes with varying rotation
         for k in 0..10 {
             let angle = k as f32 / 10.0 * std::f32::consts::TAU;
             let radius = 8.0;
             let x = angle.cos() * radius;
             let z = angle.sin() * radius - 5.0;
-            let size = 0.5 + (k as f32 * 0.2);
             engine.scene.spawn_node(
                 Node3D::new(Some(cube_model)).with_transform(
                 Transform3D::new()
@@ -198,7 +194,7 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut window = Window::new(
-        "epic window",
+        "example_scene",
         640,
         480,
         WindowOptions {
@@ -209,7 +205,7 @@ fn main() {
     window.set_target_fps(0); // uncapped framerate
     let engine = block_on(Engine::new(window));
 
-    let epic_game = EpicGame {
+    let epic_game = ExampleScene {
         time_passed: 0.0,
         moving_cube_id: None,
         floating_platform_id: None,

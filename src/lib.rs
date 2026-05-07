@@ -244,7 +244,7 @@ impl Engine<'_> {
                 "\rFPS: {:.2} | Frames Drawn: {:<6} | Nodes: {}     ",
                 self.debug.fps,
                 self.debug.total_frames,
-                self.scene.nodes.len()
+                self.scene.nodes.len() + self.canvas.nodes.len()
             );
             use std::io::Write;
             let _ = std::io::stdout().flush();
