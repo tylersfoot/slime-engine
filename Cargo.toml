@@ -10,7 +10,7 @@ repository = "https://github.com/tylersfoot/slime-engine"
 minifb = "0.28.0"
 winapi = "0.3.9"
 raw-window-handle = "0.6.2"
-rand = "0.10.0"
+rand = "0.10.1"
 # nalgebra = "0.34.0"
 slotmap = "1.1.1"
 # ---- gpu stuff
@@ -18,12 +18,13 @@ slotmap = "1.1.1"
 anyhow = "1.0.102"
 env_logger = "0.11.10"
 log = "0.4.29"
-wgpu = "29.0.1"
+wgpu = "29.0.3"
 pollster = "0.4.0"
 bytemuck = { version = "1.25.0", features = [ "derive" ] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 cgmath = "0.18.0"
 tobj = "4.0.3"
+num_enum = "0.7.6"
 
 [build-dependencies]
 anyhow = "1.0"
@@ -37,8 +38,8 @@ codegen-units = 1 # better inlining behavior / easier to read hot paths
 lto = false # optional, can obscure things if too aggressive—drop if confusing
 
 [lints.clippy]
-type-complexity = "allow"
-too-many-arguments = "allow"
+type_complexity = "allow"
+too-many_arguments = "allow"
 # pedantic = { level = "warn", priority = -1 }
 # restriction = { level = "warn", priority = -1 }
 # nursery = { level = "warn", priority = -1 }

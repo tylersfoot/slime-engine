@@ -8,7 +8,7 @@ use slime_engine::{
     node::Node3D,
     primitives::Primitive,
     scene::{NodeId, CameraId},
-    Key,
+    input::{Key},
     pollster::block_on,
     env_logger,
 };
@@ -136,7 +136,7 @@ impl App for ExampleScene {
 
     fn update(&mut self, engine: &mut Engine, dt: Duration) {
         if let Some(camera) = self.camera && let Some(camera2) = self.camera2 {
-            if engine.gfx.window.is_key_down(Key::C) {
+            if engine.input.is_key_down(Key::C) {
                 engine.scene.set_active_camera(camera2);
             } else {
                 engine.scene.set_active_camera(camera);

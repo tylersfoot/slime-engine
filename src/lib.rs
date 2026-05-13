@@ -1,10 +1,9 @@
 #![allow(unused)]
 
 use std::mem::ManuallyDrop;
-use minifb::{KeyRepeat, MouseButton};
 use wgpu::util::DeviceExt;
 use image::GenericImageView;
-pub use minifb::{CursorStyle, Key, MouseMode, WindowOptions};
+pub use minifb::{CursorStyle, WindowOptions};
 use cgmath::prelude::*;
 use std::time::{Duration, Instant};
 pub use pollster;
@@ -22,12 +21,14 @@ pub mod camera;
 pub mod transform;
 pub mod node;
 pub mod primitives;
+pub mod input;
 
 use crate::window::Window;
 use crate::core::GraphicsContext;
 use crate::render::Renderer;
 use crate::scene::{Scene, Canvas};
 use crate::transform::Transform3D;
+use crate::input::{InputState, Key, MouseMode, MouseButton};
 
 // a struct to hold real-time debug information
 struct DebugInfo {
@@ -77,6 +78,7 @@ pub struct Engine<'a> {
     pub renderer: Renderer,
     pub scene: Scene,
     pub canvas: Canvas,
+    pub input: InputState,
 
     debug: DebugInfo,
     window_active: bool,
@@ -94,11 +96,14 @@ impl Engine<'_> {
         let scene = Scene::new(&gfx, &renderer).await;
         let canvas = Canvas::new(&gfx, &renderer);
 
+        let input = InputState::new();
+
         let mut engine = Engine {
             gfx,
             renderer,
             scene,
             canvas,
+            input,
             debug: DebugInfo::new(),
             window_active: false,
         };
@@ -173,19 +178,17 @@ impl Engine<'_> {
         loop {
             // processes events like key presses, mouse movements, close button, etc.
             self.gfx.window.update();
+            self.input.update(&self.gfx.window);
 
             // handle special keys
-            let keys = self.gfx.window.get_keys();
-            let mouse_pressed = self.gfx.window.get_mouse_down(MouseButton::Left);
-            if keys.contains(&Key::Backspace) { return }
-
+            if self.input.is_key_down(Key::Backspace) { return }
             if self.window_active &&
-                (keys.contains(&Key::Escape) || !self.gfx.window.is_active()) {
+                (self.input.is_key_down(Key::Escape) || !self.gfx.window.is_active()) {
                 // unlock mouse if hit esc or unfocus window
                 self.gfx.window.set_cursor_visibility(true);
                 self.window_active = false;
             }
-            if !self.window_active && mouse_pressed {
+            if !self.window_active && self.input.get_mouse_down(MouseButton::Left) {
                 // lock mouse if clicked on
                 self.gfx.window.set_cursor_visibility(false);
                 self.window_active = true;
@@ -198,7 +201,7 @@ impl Engine<'_> {
             // handle infinite mouse movement
             let mut mouse_delta = (0.0, 0.0);
             if self.window_active && self.gfx.window.is_active()
-                && let Some((x, y)) = self.gfx.window.get_mouse_pos(MouseMode::Pass) {
+                && let Some((x, y)) = self.input.get_mouse_pos(MouseMode::Pass) {
                     let (width, height) = self.gfx.window.get_size();
                     let center_x = (width / 2) as f32;
                     let center_y = (height / 2) as f32;
@@ -214,10 +217,10 @@ impl Engine<'_> {
             }
 
             // handle scroll wheel
-            let scroll_wheel_delta = self.gfx.window.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
+            let scroll_wheel_delta = self.input.get_scroll_wheel().unwrap_or((0.0, 0.0)).1;
 
             // handle inputs
-            self.scene.camera_controller.handle_keys(&keys);
+            self.scene.camera_controller.handle_keys(&self.input.get_keys());
             self.scene.camera_controller.handle_mouse(mouse_delta.0, mouse_delta.1);
             self.scene.camera_controller.handle_mouse_scroll(scroll_wheel_delta);
 
