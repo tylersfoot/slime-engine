@@ -153,11 +153,11 @@ fn main() {
     
     let engine = block_on(Engine::new(window));
 
-    let game = ExampleCanvas {
+    let program = ExampleCanvas {
         time_passed: 0.0,
         spinny_cube_id: None,
         squishy_cube_id: None,
     };
 
-    engine.run(game);
+    engine.run(program);
 }

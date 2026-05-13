@@ -8,7 +8,7 @@ use crate::resources;
 use crate::transform::{Transform3D, Transform2D};
 use crate::node::{Node3D, Node2D};
 use crate::primitives::{Primitives, Primitive};
-use cgmath::{Matrix3, prelude::*, Point3};
+use cgmath::{Matrix3, prelude::*, Point3, Matrix4, Vector3, Rad};
 use wgpu::util::DeviceExt;
 use slotmap::{SlotMap, new_key_type};
 use std::collections::HashMap;
@@ -226,27 +226,68 @@ impl Scene {
         }
     }
 
-    pub fn get_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
-        // recursively calculates the world transform 
-        // of a node by walking up the parent chain
+    pub fn get_node_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
+        // recursively calculates the world transform of a node by walking up the parent chain
         let mut transform = cgmath::Matrix4::identity();
+        let mut current_id = Some(node_id);
 
-        if let Some(node) = self.nodes.get(node_id) {
-            // get this node's local matrix
-            transform = node.transform.calc_matrix();
-            let mut current_parent = node.parent;
-
-            // loop up the heirarchy, multiplying transforms
-            while let Some(parent_id) = current_parent {
-                if let Some(parent_node) = self.nodes.get(parent_id) {
-                    transform = parent_node.transform.calc_matrix()  * transform;
-                    current_parent = parent_node.parent;
-                } else {
-                    break; // parent not found
-                }
+        while let Some(id) = current_id {
+            if let Some(node) = self.nodes.get(id) {
+                // apply the node's transformation (parent * child)
+                transform = node.transform.calc_matrix() * transform;
+                current_id = node.parent;
+            } else {
+                break; // parent not found
             }
         }
         transform
+    }
+
+    pub fn get_node_visibility(&self, node_id: NodeId) -> bool {
+        // walks up hierarchy to determine visibility
+        let mut current_id = Some(node_id);
+
+        while let Some(id) = current_id {
+            if let Some(node) = self.nodes.get(id) {
+                // if any parent is hidden, this node is hidden
+                if !node.visibility {
+                    return false;
+                }
+                current_id = node.parent;
+            } else {
+                break; // parent not found
+            }
+        }
+        true
+    }
+
+    // recursively updates a node's global transform and visibility
+    fn update_node_recursive(
+        &mut self,
+        current_id: NodeId,
+        parent_transform: Matrix4<f32>,
+        parent_visible: bool,
+        hierarchy: &HashMap<Option<NodeId>, Vec<NodeId>>,
+        node_visibility: &mut HashMap<NodeId, bool>,
+    ) {
+        // limited scope to prevent multiple mut borrows of `nodes`
+        let (global_transform, effective_visibility) = {
+            let node = self.nodes.get_mut(current_id).unwrap();
+            // render if both node visible and parent(s) visible
+            let effective_visibility = node.visibility && parent_visible;
+            node_visibility.insert(current_id, effective_visibility);
+            // calculate global transform
+            node.global_transform = parent_transform * node.transform.calc_matrix();
+
+            (node.global_transform, effective_visibility)
+        };
+
+        // recurse into children
+        if let Some(children) = hierarchy.get(&Some(current_id)) {
+            for &child_id in children {
+                self.update_node_recursive(child_id, global_transform, effective_visibility, hierarchy, node_visibility);
+            }
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -273,7 +314,6 @@ impl Scene {
         };
 
         // update light
-        use cgmath::{Matrix4, Point3, Vector3, Rad};
         let light_view_matrix = Matrix4::look_at_rh(
             self.light_uniform.position.into(),
             Point3::from(self.light_uniform.position) + Vector3::from(self.light_uniform.direction),
@@ -291,9 +331,23 @@ impl Scene {
             bytemuck::cast_slice(&[self.light_uniform]),
         );
 
-        // process nodes and instancing
-        for (_, asset) in &mut self.assets {
-            asset.instance_count = 0;
+        // build hierarchy
+        let mut hierarchy: HashMap<Option<NodeId>, Vec<NodeId>> = HashMap::new();
+        for (id, node) in &self.nodes {
+            hierarchy.entry(node.parent).or_default().push(id);
+        }
+
+        // stores whether a node should be rendered after checking parent chain
+        let mut node_visibility_map: HashMap<NodeId, bool> = HashMap::new();
+        for node_id in self.nodes.keys() {
+            node_visibility_map.insert(node_id, true);
+        }
+
+        // start recursion at root nodes and push down to children
+        if let Some(root_nodes) = hierarchy.get(&None) {
+            for &root_id in root_nodes {
+                self.update_node_recursive(root_id, Matrix4::identity(), true, &hierarchy, &mut node_visibility_map);
+            }
         }
 
         // create temporary buckets to hold the raw GPU data for each model
@@ -302,31 +356,26 @@ impl Scene {
             instance_data.insert(model_id, Vec::new());
         }
 
-        // calculate all global transforms first
-        let mut global_transforms = Vec::with_capacity(self.nodes.len());
-        for (id, _) in self.nodes.iter() {
-            global_transforms.push((id, self.get_global_transform(id)));
+        // reset instance counts
+        for (_, asset) in &mut self.assets {
+            asset.instance_count = 0;
         }
 
-        // apply global transforms to nodes
-        for (id, global_matrix) in global_transforms {
-            if let Some(node) = self.nodes.get_mut(id) {
-                node.global_transform = global_matrix;
+        for (id, node) in &self.nodes {
+            // if the node is visible & has a model, convert it to bytes and bucket it
+            if let Some(&is_visible) = node_visibility_map.get(&id) && is_visible
+                && let Some(model_id) = node.model_id {
+                let raw = InstanceRaw3D {
+                    model: node.global_transform.into(),
+                    normal: Matrix3::from(node.transform.rotation).into(),
+                    color: node.color,
+                };
 
-                // if the node has a model, convert it to bytes and bucket it
-                if let Some(model_id) = node.model_id {
-                    let raw = InstanceRaw3D {
-                        model: node.global_transform.into(),
-                        normal: Matrix3::from(node.transform.rotation).into(),
-                        color: node.color,
-                    };
-
-                    if let Some(bucket) = instance_data.get_mut(&model_id) {
-                        bucket.push(raw);
-                    }
-                    if let Some(asset) = self.assets.get_mut(model_id) {
-                        asset.instance_count += 1;
-                    }
+                if let Some(bucket) = instance_data.get_mut(&model_id) {
+                    bucket.push(raw);
+                }
+                if let Some(asset) = self.assets.get_mut(model_id) {
+                    asset.instance_count += 1;
                 }
             }
         }
@@ -455,27 +504,68 @@ impl Canvas {
         }
     }
 
-    pub fn get_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
-        // recursively calculates the world transform 
-        // of a node by walking up the parent chain
+    pub fn get_node_global_transform(&self, node_id: NodeId) -> cgmath::Matrix4<f32> {
+        // recursively calculates the world transform of a node by walking up the parent chain
         let mut transform = cgmath::Matrix4::identity();
+        let mut current_id = Some(node_id);
 
-        if let Some(node) = self.nodes.get(node_id) {
-            // get this node's local matrix
-            transform = node.transform.calc_matrix();
-            let mut current_parent = node.parent;
-
-            // loop up the heirarchy, multiplying transforms
-            while let Some(parent_id) = current_parent {
-                if let Some(parent_node) = self.nodes.get(parent_id) {
-                    transform = parent_node.transform.calc_matrix()  * transform;
-                    current_parent = parent_node.parent;
-                } else {
-                    break; // parent not found
-                }
+        while let Some(id) = current_id {
+            if let Some(node) = self.nodes.get(id) {
+                // apply the node's transformation (parent * child)
+                transform = node.transform.calc_matrix() * transform;
+                current_id = node.parent;
+            } else {
+                break; // parent not found
             }
         }
         transform
+    }
+
+    pub fn get_node_visibility(&self, node_id: NodeId) -> bool {
+        // walks up hierarchy to determine visibility
+        let mut current_id = Some(node_id);
+
+        while let Some(id) = current_id {
+            if let Some(node) = self.nodes.get(id) {
+                // if any parent is hidden, this node is hidden
+                if !node.visibility {
+                    return false;
+                }
+                current_id = node.parent;
+            } else {
+                break; // parent not found
+            }
+        }
+        true
+    }
+
+    // recursively updates a node's global transform and visibility
+    fn update_node_recursive(
+        &mut self,
+        current_id: NodeId,
+        parent_transform: Matrix4<f32>,
+        parent_visible: bool,
+        hierarchy: &HashMap<Option<NodeId>, Vec<NodeId>>,
+        node_visibility: &mut HashMap<NodeId, bool>,
+    ) {
+        // limited scope to prevent multiple mut borrows of `nodes`
+        let (global_transform, effective_visibility) = {
+            let node = self.nodes.get_mut(current_id).unwrap();
+            // render if both node visible and parent(s) visible
+            let effective_visibility = node.visibility && parent_visible;
+            node_visibility.insert(current_id, effective_visibility);
+            // calculate global transform
+            node.global_transform = parent_transform * node.transform.calc_matrix();
+
+            (node.global_transform, effective_visibility)
+        };
+
+        // recurse into children
+        if let Some(children) = hierarchy.get(&Some(current_id)) {
+            for &child_id in children {
+                self.update_node_recursive(child_id, global_transform, effective_visibility, hierarchy, node_visibility);
+            }
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -487,32 +577,39 @@ impl Canvas {
     pub fn update(&mut self, dt: std::time::Duration, device: &wgpu::Device, queue: &wgpu::Queue) {
         // update camera
         self.camera_uniform.update_view_proj(&self.camera, &self.camera.projection);
-        
         queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
 
+        // build hierarchy
+        let mut hierarchy: HashMap<Option<NodeId>, Vec<NodeId>> = HashMap::new();
+        for (id, node) in &self.nodes {
+            hierarchy.entry(node.parent).or_default().push(id);
+        }
 
-        // calculate all global transforms first
-        let mut global_transforms = Vec::with_capacity(self.nodes.len());
-        for (id, _) in self.nodes.iter() {
-            global_transforms.push((id, self.get_global_transform(id)));
+        // stores whether a node should be rendered after checking parent chain
+        let mut node_visibility_map: HashMap<NodeId, bool> = HashMap::new();
+        for node_id in self.nodes.keys() {
+            node_visibility_map.insert(node_id, true);
+        }
+
+        // start recursion at root nodes and push down to children
+        if let Some(root_nodes) = hierarchy.get(&None) {
+            for &root_id in root_nodes {
+                self.update_node_recursive(root_id, Matrix4::identity(), true, &hierarchy, &mut node_visibility_map);
+            }
         }
 
         // store z_index, global matrix, color to sort later
-        let mut render_data: Vec<(i32, cgmath::Matrix4<f32>, [f32; 4])> = Vec::new();
-        for (id, global_matrix) in global_transforms {
-            if let Some(node) = self.nodes.get_mut(id) {
-                node.global_transform = global_matrix;
-                render_data.push((
-                    node.z_index,
-                    global_matrix,
-                    node.color
-                ));
-            }
-        }
+        let mut render_data: Vec<(i32, cgmath::Matrix4<f32>, [f32; 4])> = self.nodes.iter()
+            .filter(|(id, _)| {
+                // only keep nodes that are visible
+                *node_visibility_map.get(id).unwrap_or(&false)
+            })
+            .map(|(_, node)| (node.z_index, node.global_transform, node.color))
+            .collect();
 
         // order by z_index
         render_data.sort_by_key(|i| i.0);

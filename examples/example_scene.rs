@@ -20,17 +20,23 @@ fn rand_color() -> [f32; 4] {
 
 struct ExampleScene {
     time_passed: f32,
+    camera: Option<CameraId>,
+    camera2: Option<CameraId>,
     moving_cube_id: Option<NodeId>,
     floating_platform_id: Option<NodeId>,
     crazycorn_id: Option<NodeId>,
-    camera: Option<CameraId>,
-    camera2: Option<CameraId>,
+    planet_id: Option<NodeId>,
+    moons: Vec<NodeId>,
+    last_moon_toggle: f32,
+    hidden_moon_index: usize,
+    planet_visible: bool,
+    last_planet_toggle: f32,
 }
 
 impl App for ExampleScene {
     fn start(&mut self, engine: &mut Engine) {
         let camera = engine.scene.spawn_camera(
-            [0.0, 5.0, 10.0],
+            [0.0, 5.0, 20.0],
             -90.0,
             -20.0
         );
@@ -44,14 +50,20 @@ impl App for ExampleScene {
         self.camera2 = Some(camera2);
 
         let cube_model = engine.scene.load_primitive(Primitive::Cube, &engine.gfx, &engine.renderer);
-        let crazycorn_model = block_on(engine.scene.load_model("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer)).unwrap();
+        let crazycorn_model =  if let Some(model) = block_on(
+            engine.scene.load_model("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer)
+        ) {
+            model
+        } else {
+            engine.scene.load_primitive(Primitive::Cube, &engine.gfx, &engine.renderer)
+        };
 
         // moving cube
         let moving_cube_id = engine.scene.spawn_node(
             Node3D::new(Some(cube_model)).with_transform(
                 Transform3D::new()
-                    .with_position([0.0, 20.0, -5.0])
-                    .with_scale([2.0, 2.0, 2.0])
+                    .with_position([-5.0, 5.0, 0.0])
+                    .with_scale([1.0, 1.0, 1.0])
                 ).with_color(rand_color())
         );
         self.moving_cube_id = Some(moving_cube_id);
@@ -97,31 +109,12 @@ impl App for ExampleScene {
         let floating_platform_id = engine.scene.spawn_node(
             Node3D::new(Some(cube_model)).with_transform(
                 Transform3D::new()
-                    .with_position([0.0, 20.0, -5.0])
+                    .with_position([-8.0, 5.0, 2.0])
                     .with_rotation(Quaternion::from(Euler::new(Deg(30.0), Deg(45.0), Deg(0.0))))
                     .with_scale([3.0, 0.2, 3.0])
             ).with_color(rand_color())
         );
         self.floating_platform_id = Some(floating_platform_id);
-
-        // ring of scattered cubes with varying rotation
-        for k in 0..10 {
-            let angle = k as f32 / 10.0 * std::f32::consts::TAU;
-            let radius = 8.0;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius - 5.0;
-            engine.scene.spawn_node(
-                Node3D::new(Some(cube_model)).with_transform(
-                Transform3D::new()
-                    .with_position([x, 10.0, z])
-                    .with_rotation(Quaternion::from(Euler::new(
-                        Deg(k as f32 * 12.0),
-                        Deg(k as f32 * 20.0),
-                        Deg(0.0)
-                    )))
-                ).with_color(rand_color())
-            );
-        }
 
         let crazycorn_id = engine.scene.spawn_node(
             Node3D::new(Some(crazycorn_model)).with_transform(
@@ -131,6 +124,88 @@ impl App for ExampleScene {
             )
         );
         self.crazycorn_id = Some(crazycorn_id);
+
+        let planet_id = engine.scene.spawn_node(
+            Node3D::new(Some(cube_model))
+                .with_transform(Transform3D::new()
+                    .with_position([0.0, 7.0, 0.0])
+                    .with_scale([1.5, 1.5, 1.5])
+                )
+                .with_color(rand_color())
+        );
+        self.planet_id = Some(planet_id);
+
+        // extra cubes to make planet look cooler
+        let gr = std::f32::consts::GOLDEN_RATIO;
+        let gr_sq = gr * gr;
+        engine.scene.spawn_node( // 72 deg
+            Node3D::new(Some(cube_model))
+                .with_parent(planet_id)
+                .with_transform(Transform3D::new()
+                    .with_rotation(Quaternion::from(Euler::new(
+                        Deg(gr.atan().to_degrees()),
+                        Deg((gr / 2.0).asin().to_degrees()),
+                        Deg(-(1.0 / gr).atan().to_degrees())
+                    )))
+                )
+                .with_color(rand_color())
+        );
+        engine.scene.spawn_node( // 144 deg
+            Node3D::new(Some(cube_model))
+                .with_parent(planet_id)
+                .with_transform(Transform3D::new()
+                    .with_rotation(Quaternion::from(Euler::new(
+                        Deg(180.0 - (1.0 / gr_sq).atan().to_degrees()),
+                        Deg(30.0),
+                        Deg(-180.0 + gr_sq.atan().to_degrees())
+                    )))
+                )
+                .with_color(rand_color())
+        );
+        engine.scene.spawn_node( // 216 deg
+            Node3D::new(Some(cube_model))
+                .with_parent(planet_id)
+                .with_transform(Transform3D::new()
+                    .with_rotation(Quaternion::from(Euler::new(
+                        Deg(-180.0 + (1.0 / gr_sq).atan().to_degrees()),
+                        Deg(-30.0),
+                        Deg(-180.0 + gr_sq.atan().to_degrees())
+                    )))
+                )
+                .with_color(rand_color())
+        );
+        engine.scene.spawn_node( // 288 deg
+            Node3D::new(Some(cube_model))
+                .with_parent(planet_id)
+                .with_transform(Transform3D::new()
+                    .with_rotation(Quaternion::from(Euler::new(
+                        Deg(-gr.atan().to_degrees()),
+                        Deg((-gr / 2.0).asin().to_degrees()),
+                        Deg(-(1.0 / gr).atan().to_degrees())
+                    )))
+                )
+                .with_color(rand_color())
+        );
+
+        // spawn moons in a ring around the planet
+        for i in 0..20 {
+            let angle = (i as f32 / 20.0) * std::f32::consts::TAU;
+            let dist = 2.5;
+            let moon_id = engine.scene.spawn_node(
+                Node3D::new(Some(cube_model))
+                    .with_parent(planet_id)
+                    .with_transform(Transform3D::new()
+                        .with_position([angle.cos() * dist, 0.0, angle.sin() * dist])
+                        .with_rotation(Quaternion::from(Euler::new(
+                            Deg(i as f32 * 12.0),
+                            Deg(i as f32 * 20.0),
+                            Deg(0.0)
+                        )))
+                        .with_scale([0.2, 0.2, 0.2])
+                    ).with_color(rand_color())
+            );
+            self.moons.push(moon_id);
+        }
 
     }
 
@@ -154,7 +229,7 @@ impl App for ExampleScene {
 
         if let Some(node_id) = self.moving_cube_id
             && let Some(node) = engine.scene.nodes.get_mut(node_id) {
-            node.transform.position = [offset1, 13.0 + offset2, -5.0 + offset3].into();
+            node.transform.position = [-5.0 + offset1, 4.0 + offset2, 0.0 + offset3].into();
         }
 
         // slowly spin the floating platform
@@ -166,6 +241,7 @@ impl App for ExampleScene {
             node.transform.rotation = node.transform.rotation * spin;
         }
 
+        // crazycorn go crazy
         if let Some(node_id) = self.crazycorn_id
             && let Some(node) = engine.scene.nodes.get_mut(node_id) {
             let scale = 0.01;
@@ -187,6 +263,42 @@ impl App for ExampleScene {
                 ])
                 .with_rotation(new_rotation);
         }
+
+        // rotate the planet (and therefore the moons)
+        if let Some(p_id) = self.planet_id && let Some(planet) = engine.scene.nodes.get_mut(p_id) {
+            let rot = Quaternion::from_angle_y(Rad(45.0_f32.to_radians() * delta));
+            planet.transform.rotation = planet.transform.rotation * rot;
+            
+            // toggle planet visibility
+            if self.time_passed - self.last_planet_toggle > 2.0 {
+                self.planet_visible = !self.planet_visible;
+                planet.visibility = self.planet_visible;
+                self.last_planet_toggle = self.time_passed;
+                if !self.planet_visible {
+                    self.last_planet_toggle -= 1.5; // shorter time off
+                }
+            }
+        }
+
+        // cycle through moon visibility
+        if self.time_passed - self.last_moon_toggle > 0.1 {
+            self.last_moon_toggle = self.time_passed;
+            
+            // reset all to visible first
+            for &m_id in &self.moons {
+                if let Some(moon) = engine.scene.nodes.get_mut(m_id) {
+                    moon.visibility = true;
+                }
+            }
+            
+            // hide the current moon
+            let current_id = self.moons[self.hidden_moon_index];
+            if let Some(moon) = engine.scene.nodes.get_mut(current_id) {
+                moon.visibility = false;
+            }
+
+            self.hidden_moon_index = (self.hidden_moon_index + 1) % self.moons.len();
+        }
     }
 }
 
@@ -195,24 +307,30 @@ fn main() {
 
     let mut window = Window::new(
         "example_scene",
-        640,
-        480,
+        1000,
+        800,
         WindowOptions {
             resize: true,
             ..Default::default()
         },
     ).unwrap_or_else(|e| panic!("{}", e));
-    window.set_target_fps(0); // uncapped framerate
+    window.set_target_fps(60); // uncapped framerate
     let engine = block_on(Engine::new(window));
 
-    let epic_game = ExampleScene {
+    let program = ExampleScene {
         time_passed: 0.0,
+        camera: None,
+        camera2: None,
         moving_cube_id: None,
         floating_platform_id: None,
         crazycorn_id: None,
-        camera: None,
-        camera2: None,
+        planet_id: None,
+        moons: Vec::new(),
+        last_moon_toggle: 0.0,
+        hidden_moon_index: 0,
+        planet_visible: true,
+        last_planet_toggle: 0.0,
     };
 
-    engine.run(epic_game);
+    engine.run(program);
 }

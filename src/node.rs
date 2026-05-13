@@ -15,6 +15,8 @@ pub struct Node3D {
     pub parent: Option<NodeId>,
     // indices of child nodes
     pub children: Vec<NodeId>,
+    // whether to render this node's geometry (affects children)
+    pub visibility: bool,
 }
 
 impl Node3D {
@@ -34,6 +36,16 @@ impl Node3D {
         self.color = color;
         self
     }
+
+    pub fn with_visibility(mut self, visibility: bool) -> Self {
+        self.visibility = visibility;
+        self
+    }
+
+    pub fn with_parent(mut self, parent_id: NodeId) -> Self {
+        self.parent = Some(parent_id);
+        self
+    }
 }
 
 impl Default for Node3D {
@@ -45,6 +57,7 @@ impl Default for Node3D {
             color: [1.0, 1.0, 1.0, 1.0],
             parent: None,
             children: Vec::new(),
+            visibility: true,
         }
     }
 }
@@ -64,6 +77,8 @@ pub struct Node2D {
     pub parent: Option<NodeId>,
     // indices of child nodes
     pub children: Vec<NodeId>,
+    // whether to render this node's geometry (affects children)
+    pub visibility: bool,
 }
 
 impl Node2D {
@@ -85,6 +100,16 @@ impl Node2D {
         self.z_index = z_index;
         self
     }
+
+    pub fn with_visibility(mut self, visibility: bool) -> Self {
+        self.visibility = visibility;
+        self
+    }
+
+    pub fn with_parent(mut self, parent_id: NodeId) -> Self {
+        self.parent = Some(parent_id);
+        self
+    }
 }
 
 impl Default for Node2D {
@@ -97,6 +122,7 @@ impl Default for Node2D {
             color: [1.0, 1.0, 1.0, 1.0],
             parent: None,
             children: Vec::new(),
+            visibility: true,
         }
     }
 }
