@@ -9,11 +9,7 @@ pub struct Transform3D {
 
 impl Transform3D {
     pub fn new() -> Self {
-        Self {
-            position: Vector3::zero(), // at origin
-            rotation: Quaternion::one(), // identity quaternion (no rotation)
-            scale: Vector3::new(1.0, 1.0, 1.0), // 100% scale
-        }
+        Self::default()
     }
 
     // calculates the 4x4 matrix used by the GPU to place vertices in the world
@@ -43,7 +39,11 @@ impl Transform3D {
 
 impl Default for Transform3D {
     fn default() -> Self {
-        Self::new()
+        Self {
+            position: Vector3::zero(), // at origin
+            rotation: Quaternion::one(), // identity quaternion (no rotation)
+            scale: Vector3::new(1.0, 1.0, 1.0), // 100% scale
+        }
     }
 }
 
@@ -56,11 +56,7 @@ pub struct Transform2D {
 
 impl Transform2D {
     pub fn new() -> Self {
-        Self {
-            position: Vector2::zero(),
-            rotation: 0.0,
-            scale: Vector2::new(1.0, 1.0),
-        }
+        Self::default()
     }
 
     // calculates the 4x4 matrix used by the GPU to place vertices in the world
@@ -89,6 +85,10 @@ impl Transform2D {
 
 impl Default for Transform2D {
     fn default() -> Self {
-        Self::new()
+        Self {
+            position: Vector2::zero(),
+            rotation: 0.0,
+            scale: Vector2::new(1.0, 1.0),
+        }
     }
 }

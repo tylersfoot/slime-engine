@@ -20,12 +20,8 @@ pub struct Node3D {
 impl Node3D {
     pub fn new(model_id: Option<ModelId>) -> Self {
         Self {
-            transform: Transform3D::new(),
-            global_transform: Matrix4::from_scale(1.0),
             model_id,
-            color: [1.0, 1.0, 1.0, 1.0],
-            parent: None,
-            children: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -72,15 +68,7 @@ pub struct Node2D {
 
 impl Node2D {
     pub fn new() -> Self {
-        Self {
-            transform: Transform2D::new(),
-            global_transform: Matrix4::from_scale(1.0),
-            texture_id: None,
-            z_index: 0,
-            color: [1.0, 1.0, 1.0, 1.0],
-            parent: None,
-            children: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn with_transform(mut self, transform: Transform2D) -> Self {

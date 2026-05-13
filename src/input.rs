@@ -147,16 +147,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new() -> Self {
-        InputState {
-            keys_down: [false; KEY_COUNT],
-            keys_pressed: [false; KEY_COUNT],
-            keys_released: [false; KEY_COUNT],
-            mouse_pos: None,
-            mouse_pos_unscaled: None,
-            window_size: (1.0, 1.0),
-            mouse_buttons_down: (false, false, false),
-            scroll_wheel: None,
-        }
+        Self::default()
     }
 
     pub(crate) fn update(&mut self, window: &Window) {
@@ -295,6 +286,15 @@ impl InputState {
 
 impl Default for InputState {
     fn default() -> Self {
-        Self::new()
+        Self {
+            keys_down: [false; KEY_COUNT],
+            keys_pressed: [false; KEY_COUNT],
+            keys_released: [false; KEY_COUNT],
+            mouse_pos: None,
+            mouse_pos_unscaled: None,
+            window_size: (1.0, 1.0),
+            mouse_buttons_down: (false, false, false),
+            scroll_wheel: None,
+        }
     }
 }

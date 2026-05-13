@@ -85,10 +85,7 @@ pub struct CameraUniform3D {
  
 impl CameraUniform3D {
     pub fn new() -> Self {
-        Self {
-            view_position: [0.0; 4],
-            view_proj: Matrix4::identity().into(),
-        }
+        Self::default()
     }
  
     pub fn update_view_proj(&mut self, camera: &Camera3D, projection: &Projection3D) {
@@ -99,7 +96,10 @@ impl CameraUniform3D {
 
 impl Default for CameraUniform3D {
     fn default() -> Self {
-        Self::new()
+        Self {
+            view_position: [0.0; 4],
+            view_proj: Matrix4::identity().into(),
+        }
     }
 }
 
@@ -111,9 +111,7 @@ pub struct CameraUniform2D {
  
 impl CameraUniform2D {
     pub fn new() -> Self {
-        Self {
-            view_proj: Matrix4::identity().into(),
-        }
+        Self::default()
     }
  
     pub fn update_view_proj(&mut self, camera: &Camera2D, projection: &Projection2D) {
@@ -123,7 +121,9 @@ impl CameraUniform2D {
 
 impl Default for CameraUniform2D {
     fn default() -> Self {
-        Self::new()
+        Self {
+            view_proj: Matrix4::identity().into(),
+        }
     }
 }
 
