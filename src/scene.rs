@@ -365,9 +365,16 @@ impl Scene {
             // if the node is visible & has a model, convert it to bytes and bucket it
             if let Some(&is_visible) = node_visibility_map.get(&id) && is_visible
                 && let Some(model_id) = node.model_id {
+                // extract the upper 3x3 matrix from the global transform
+                let global_matrix: cgmath::Matrix4<f32> = node.global_transform;
+                let normal_matrix: cgmath::Matrix3<f32> = Matrix3::from_cols(
+                    global_matrix.x.truncate(),
+                    global_matrix.y.truncate(),
+                    global_matrix.z.truncate(),
+                );
                 let raw = InstanceRaw3D {
-                    model: node.global_transform.into(),
-                    normal: Matrix3::from(node.transform.rotation).into(),
+                    model: global_matrix.into(),
+                    normal: normal_matrix.into(),
                     color: node.color,
                 };
 
