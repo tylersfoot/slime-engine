@@ -258,7 +258,7 @@ impl CameraController {
     pub fn update_camera(&mut self, camera: &mut Camera3D, dt: Duration) {
         let dt = dt.as_secs_f32(); // delta time for consistent speed over time
 
-        let sprint_speed = 4.0;
+        let sprint_speed = 8.0;
         // scale sprint mult from [1.0, sprint_speed]
         let sprint_mult = 1.0_f32.max(sprint_speed * f32::from(self.sprint as u8));
         let speed = self.speed * sprint_mult;

@@ -27,7 +27,7 @@ struct VertexOutput {
 fn vs_main(
     model: VertexInput,
 ) -> VertexOutput {
-    let scale = 0.25;
+    let scale = 0.0;
     var out: VertexOutput;
     // vector goes on right, and matrix goes on left in order of importance
     // we apply the camera's view projection to everythnig in world view (the model)
@@ -40,5 +40,6 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    // return vec4<f32>(in.color, 1.0);
+    return vec4<f32>(in.color, 0.0);
 }

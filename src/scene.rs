@@ -49,7 +49,7 @@ impl Scene {
         let cameras = SlotMap::with_key();
         let active_camera = None;
 
-        let camera_controller = CameraController::new(2.0, 0.4);
+        let camera_controller = CameraController::new(32.0, 0.4);
  
         // create camera uniform so we can use our camera data in shaders
         let mut camera_uniform = CameraUniform3D::new();
