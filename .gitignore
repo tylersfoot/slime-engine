@@ -15,6 +15,8 @@ target
 
 
 Cargo.lock
-
+# render doc captures
+*.rdc
+flamegraph.svg
 # resources (like models) - big file sizes
 res/*

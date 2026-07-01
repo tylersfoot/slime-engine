@@ -314,7 +314,7 @@ fn main() {
             ..Default::default()
         },
     ).unwrap_or_else(|e| panic!("{}", e));
-    window.set_target_fps(60); // uncapped framerate
+    window.set_target_fps(0); // uncapped framerate
     let engine = block_on(Engine::new(window));
 
     let program = ExampleScene {

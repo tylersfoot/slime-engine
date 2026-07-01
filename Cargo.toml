@@ -32,14 +32,14 @@ fs_extra = "1.2"
 glob = "0.3"
 
 [profile.release]
-debug = true
-opt-level = 3
+debug = true # readable function names for debugging
+opt-level = 3 # fully optimize code
 codegen-units = 1 # better inlining behavior / easier to read hot paths
-lto = false # optional, can obscure things if too aggressive—drop if confusing
+lto = false # merges functions when on, harder to debug
 
 [lints.clippy]
 type_complexity = "allow"
-too-many_arguments = "allow"
+too_many_arguments = "allow"
 # pedantic = { level = "warn", priority = -1 }
 # restriction = { level = "warn", priority = -1 }
 # nursery = { level = "warn", priority = -1 }
