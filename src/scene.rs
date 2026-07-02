@@ -137,7 +137,7 @@ impl Scene {
     }
 
     // loads .obj file from disk, creates buffers, returns ID handle
-    pub async fn load_model(
+    pub async fn load_obj_file(
         &mut self,
         file_path: &str,
         gfx: &GraphicsContext<'_>,
@@ -161,6 +161,17 @@ impl Scene {
                 None
             }
         }
+    }
+
+    // loads a given Model
+    pub fn load_model(
+        &mut self,
+        model: Model,
+        gfx: &GraphicsContext<'_>,
+    ) -> ModelId {
+        let asset = ModelAsset::new(&gfx.device, model);
+        let id = self.assets.len();
+        self.assets.insert(asset)
     }
 
     // loads a primitive object/model

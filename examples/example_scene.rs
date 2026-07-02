@@ -51,7 +51,7 @@ impl App for ExampleScene {
 
         let cube_model = engine.scene.load_primitive(Primitive::Cube, &engine.gfx, &engine.renderer);
         let crazycorn_model =  if let Some(model) = block_on(
-            engine.scene.load_model("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer)
+            engine.scene.load_obj_file("crazycorn/crazycorn.obj", &engine.gfx, &engine.renderer)
         ) {
             model
         } else {
