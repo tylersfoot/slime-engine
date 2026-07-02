@@ -388,7 +388,7 @@ impl Model {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        log::info!("Created raw model: {} | {} vertices", name, vertices.len());
+        // log::info!("Created raw model: {} | {} vertices", name, vertices.len());
         let mesh = Mesh {
             name: name.to_string(),
             vertex_buffer,

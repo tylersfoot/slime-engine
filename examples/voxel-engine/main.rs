@@ -5,6 +5,11 @@ use slime_engine::{
     App, Engine, WindowOptions, core::GraphicsContext, env_logger, input::Key, model::{Material, MaterialTextures, MaterialUniforms, Model, ModelVertex}, node::Node3D, pollster::block_on, primitives::Primitive, scene::{CameraId, ModelId, NodeId}, transform::Transform3D, window::Window,
 };
 use std::time::Duration;
+use noise::{NoiseFn, Perlin, Seedable};
+
+const CHUNK_SIZE: usize = 32; // x/z width of a chunk
+const RENDER_DISTANCE: usize = 8; // render distance (square side length)
+const RENDER_HEIGHT: usize = 4; // how many chunks high to generate
 
 fn rand_color() -> [f32; 4] {
     [rand::random(), rand::random(), rand::random(), 1.0]
@@ -16,6 +21,8 @@ enum BlockType {
     Grass,
     Dirt,
     Stone,
+    Water,
+    Ice,
 }
 
 #[derive(Clone, Debug, Copy)]
@@ -31,103 +38,160 @@ impl Block {
     }
 }
 
-const CHUNK_SIZE: usize = 16;
+
 #[derive(Clone, Debug, Copy)]
 struct Chunk {
     position: [usize; 3], // chunk position so *CHUNK_SIZE
-    blocks: [[[Block; 16]; 16]; 16],
+    blocks: [[[Block; CHUNK_SIZE]; CHUNK_SIZE]; CHUNK_SIZE],
+    is_empty: bool, // if all blocks are air
 }
 
 impl Chunk {
     fn new(position: [usize; 3]) -> Self {
-        let blocks = [[[Block::new(); 16]; 16]; 16];
+        let blocks = [[[Block::new(); CHUNK_SIZE]; CHUNK_SIZE]; CHUNK_SIZE];
 
         let mut chunk = Self {
             position,
             blocks,
+            is_empty: true,
         };
         chunk.generate_terrain();
         chunk
     }
 
     fn generate_terrain(&mut self) {
+        let perlin = Perlin::new(42);
+
+        // density grid (cells of 4 horizontally, 8 vertically)
+        const DENSITY_WIDTH: usize = CHUNK_SIZE / 4 + 1;
+        const DENSITY_HEIGHT: usize = CHUNK_SIZE / 8 + 1;
+        let mut density_grid = [[[0.0; DENSITY_WIDTH]; DENSITY_HEIGHT]; DENSITY_WIDTH];
+
+        // calculate density grid values
+        for (x, density_x) in density_grid.iter_mut().enumerate() {
+            for (y, density_y) in density_x.iter_mut().enumerate() {
+                for (z, density) in density_y.iter_mut().enumerate() {
+                    // global coordinates
+                    let gx = (x as f64 * 4.0) + (self.position[0] * CHUNK_SIZE) as f64;
+                    let gy = (y as f64 * 8.0) + (self.position[1] * CHUNK_SIZE) as f64;
+                    let gz = (z as f64 * 4.0) + (self.position[2] * CHUNK_SIZE) as f64;
+                    let frequency = 0.03;
+                    *density = perlin.get([
+                        gx * frequency,
+                        gy * frequency,
+                        gz * frequency,
+                    ]);
+                }
+            }
+        }
+
         let mut solid_blocks = 0;
         for i in 0..(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) {
             let x = i % CHUNK_SIZE;
             let y = (i / CHUNK_SIZE) % CHUNK_SIZE;
             let z = i / (CHUNK_SIZE * CHUNK_SIZE);
 
-            let fx = x as f32;
-            let fy = y as f32;
-            let fz = z as f32;
+            // global coordinates
+            let gx = x as f64 + (self.position[0] * CHUNK_SIZE) as f64;
+            let gy = y as f64 + (self.position[1] * CHUNK_SIZE) as f64;
+            let gz = z as f64 + (self.position[2] * CHUNK_SIZE) as f64;
 
-            // Global coordinates
-            let global_fx = fx + (self.position[0] * CHUNK_SIZE) as f32;
-            let global_fy = fy + (self.position[1] * CHUNK_SIZE) as f32;
-            let global_fz = fz + (self.position[2] * CHUNK_SIZE) as f32;
+            // which density grid cell
+            let cx = x / 4;
+            let cy = y / 8;
+            let cz = z / 4;
 
-            // ==========================================
-            // 1. GLOBAL TERRAIN HEIGHT
-            // ==========================================
-            let mut height_offset = 0.0;
-            height_offset += (global_fx * 0.04).sin() * 4.0;
-            height_offset += (global_fz * 0.05).cos() * 4.0;
-            height_offset += ((global_fx + global_fz) * 0.12).sin() * 1.5;
-            height_offset -= ((global_fx * 0.25).cos() + (global_fz * 0.25).sin()).abs() * 2.0;
-            height_offset += (global_fx * 0.7).sin() * (global_fz * 0.7).cos() * 0.5;
+            // position inside density grid cell
+            let dx = (x % 4) as f64 / 4.0;
+            let dy = (y % 8) as f64 / 8.0;
+            let dz = (z % 4) as f64 / 4.0;
 
-            // Set a global base height (e.g., ground level is at Y=32 across the whole world)
-            let base_height = 32.0; 
-            
-            // NO MORE CLAMPING! We want the true global height.
-            // Using isize because terrain could technically dip below Y=0
-            let global_surface_y = (base_height + height_offset).round() as isize; 
-            let current_global_y = global_fy.round() as isize;
+            // grab density grid corners
+            let c000 = density_grid[cx  ][cy  ][cz  ];
+            let c001 = density_grid[cx  ][cy  ][cz+1];
+            let c010 = density_grid[cx  ][cy+1][cz  ];
+            let c011 = density_grid[cx  ][cy+1][cz+1];
+            let c100 = density_grid[cx+1][cy  ][cz  ];
+            let c101 = density_grid[cx+1][cy  ][cz+1];
+            let c110 = density_grid[cx+1][cy+1][cz  ];
+            let c111 = density_grid[cx+1][cy+1][cz+1];
 
-            // ==========================================
-            // 2. CAVE SYSTEM
-            // ==========================================
-            let warp_x = global_fx + (global_fy * 0.2).sin() * 2.0;
-            let warp_z = global_fz + (global_fy * 0.2).cos() * 2.0;
+            // liner interpolation
+            fn lerp(a: f64, b: f64, t: f64) -> f64 {
+                a + (b - a) * t
+            }
 
-            let cave_density = (warp_x * 0.15).sin() 
-                             * (global_fy * 0.25).cos() 
-                             * (warp_z * 0.15).sin();
-            
-            let is_cave = cave_density > 0.15;
+            // trilinear interpolation
+            let x00 = lerp(c000, c100, dx);
+            let x10 = lerp(c010, c110, dx);
+            let x01 = lerp(c001, c101, dx);
+            let x11 = lerp(c011, c111, dx);
+            let z0 = lerp(x00, x10, dy);
+            let z1 = lerp(x01, x11, dy);
+            let density = lerp(z0, z1, dz);
 
-            // ==========================================
-            // 3. BLOCK PLACEMENT (Comparing Global to Global)
-            // ==========================================
-            
-            // We now check if THIS block's absolute world position is below the world's surface
-            if current_global_y <= global_surface_y && !is_cave {
-                
-                let dirt_depth = 1.0 + ((global_fx * 0.2).sin() * 2.0).max(0.0);
-                let dirt_limit = global_surface_y - (dirt_depth.round() as isize);
+            // let mut density = density_grid[cx][cy][cz];
 
-                let block_type = if current_global_y == global_surface_y {
-                    BlockType::Grass
-                } else if current_global_y >= dirt_limit {
-                    BlockType::Dirt
-                } else {
-                    BlockType::Stone
-                };
+            // density = (density + 1.0) / 2.0;
 
-                // We still use local x, y, z to place it in the chunk's 16x16x16 array!
+            if density > 0.0 {
                 solid_blocks += 1;
                 self.blocks[x][y][z] = Block {
-                    block_type,
+                    block_type: BlockType::Stone,
                 }
             }
+
+
+            // // 1. GLOBAL TERRAIN HEIGHT
+            // let mut height_offset = 0.0;
+            // height_offset += (global_fx * 0.04).sin() * 4.0;
+            // height_offset += (global_fz * 0.05).cos() * 4.0;
+            // height_offset += ((global_fx + global_fz) * 0.12).sin() * 1.5;
+            // height_offset -= ((global_fx * 0.25).cos() + (global_fz * 0.25).sin()).abs() * 2.0;
+            // height_offset += (global_fx * 0.7).sin() * (global_fz * 0.7).cos() * 0.5;
+
+            // // Set a global base height (e.g., ground level is at Y=32 across the whole world)
+            // let base_height = 32.0; 
+            
+            // // NO MORE CLAMPING! We want the true global height.
+            // // Using isize because terrain could technically dip below Y=0
+            // let global_surface_y = (base_height + height_offset).round() as isize; 
+            // let current_global_y = global_fy.round() as isize;
+
+            // // 2. CAVE SYSTEM
+            // let warp_x = global_fx + (global_fy * 0.2).sin() * 2.0;
+            // let warp_z = global_fz + (global_fy * 0.2).cos() * 2.0;
+
+            // let cave_density = (warp_x * 0.15).sin() 
+            //                  * (global_fy * 0.25).cos() 
+            //                  * (warp_z * 0.15).sin();
+            
+            // let is_cave = cave_density > 0.15;
+
+            // // 3. BLOCK PLACEMENT (Comparing Global to Global)
+            // // We now check if THIS block's absolute world position is below the world's surface
+            // if current_global_y <= global_surface_y && !is_cave {
+            //     let dirt_depth = 1.0 + ((global_fx * 0.2).sin() * 2.0).max(0.0);
+            //     let dirt_limit = global_surface_y - (dirt_depth.round() as isize);
+
+            //     let block_type = if current_global_y == global_surface_y {
+            //         BlockType::Grass
+            //     } else if current_global_y >= dirt_limit {
+            //         BlockType::Dirt
+            //     } else {
+            //         BlockType::Stone
+            //     };
+
+            //     // We still use local x, y, z to place it in the chunk's 16x16x16 array!
+            //     solid_blocks += 1;
+            //     self.blocks[x][y][z] = Block {
+            //         block_type,
+            //     }
+            // }
         }
 
-        // temporary safeguard against empty chunks
-        if solid_blocks < 1 {
-            self.blocks[0][0][0] = Block {
-                block_type: BlockType::Stone,
-            }
-        }
+        // safeguard against empty chunks
+        self.is_empty = solid_blocks < 1;
 
     }
 
@@ -224,6 +288,10 @@ impl Chunk {
     }
 }
 
+fn generate_bare_terrain() {
+    
+}
+
 struct ExampleScene {
     time_passed: f32,
     camera: Option<CameraId>,
@@ -245,22 +313,21 @@ impl App for ExampleScene {
         let cube_model = engine.scene.load_primitive(Primitive::Cube, &engine.gfx, &engine.renderer);
         self.cube_model = Some(cube_model);
 
-        // let mut chunks: Vec<Chunk> = vec![];
-        const CHUNK_AMOUNT: usize = 8; // generate a square of chunks
-        const CHUNK_HEIGHT: usize = 3; // how tall to make chunks
-
         // generate a bunch of chunks
-        for x in 0..CHUNK_AMOUNT {
-            for y in 0..CHUNK_HEIGHT {
-                for z in 0..CHUNK_AMOUNT {
+        for x in 0..RENDER_DISTANCE {
+            for y in 0..RENDER_HEIGHT {
+                for z in 0..RENDER_DISTANCE {
                     let mut chunk = Chunk::new([x, y, z]);
+                    if chunk.is_empty {
+                        continue;
+                    }
                     let chunk_model = chunk.generate_model(gfx, layout);
                     let chunk_model_id = engine.scene.load_model(chunk_model, &engine.gfx);
                     engine.scene.spawn_node(
                         Node3D::new(Some(chunk_model_id)).with_transform(
                             Transform3D::new()
                                 .with_position([(x * CHUNK_SIZE) as f32, (y * CHUNK_SIZE) as f32, (z * CHUNK_SIZE) as f32])
-                        )
+                        ).with_color(rand_color())
                     );
                 }
             }

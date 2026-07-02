@@ -31,6 +31,10 @@ anyhow = "1.0"
 fs_extra = "1.2"
 glob = "0.3"
 
+[dev-dependencies]
+# extra dependencies for examples
+noise = "0.9.0"
+
 [profile.release]
 debug = true # readable function names for debugging
 opt-level = 3 # fully optimize code
