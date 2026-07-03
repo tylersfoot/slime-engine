@@ -75,12 +75,18 @@ impl Chunk {
                     let gx = (x as f64 * 4.0) + (self.position[0] * CHUNK_SIZE) as f64;
                     let gy = (y as f64 * 8.0) + (self.position[1] * CHUNK_SIZE) as f64;
                     let gz = (z as f64 * 4.0) + (self.position[2] * CHUNK_SIZE) as f64;
+
                     let frequency = 0.03;
-                    *density = perlin.get([
+                    let value = perlin.get([
                         gx * frequency,
                         gy * frequency,
                         gz * frequency,
                     ]);
+
+                    let sea_level = 63.0;
+                    let ground_level = 66.0;
+                    let k = 0.05;
+                    *density = value - (gy - ground_level) * k;
                 }
             }
         }
@@ -130,64 +136,12 @@ impl Chunk {
             let z1 = lerp(x01, x11, dy);
             let density = lerp(z0, z1, dz);
 
-            // let mut density = density_grid[cx][cy][cz];
-
-            // density = (density + 1.0) / 2.0;
-
             if density > 0.0 {
                 solid_blocks += 1;
                 self.blocks[x][y][z] = Block {
                     block_type: BlockType::Stone,
                 }
             }
-
-
-            // // 1. GLOBAL TERRAIN HEIGHT
-            // let mut height_offset = 0.0;
-            // height_offset += (global_fx * 0.04).sin() * 4.0;
-            // height_offset += (global_fz * 0.05).cos() * 4.0;
-            // height_offset += ((global_fx + global_fz) * 0.12).sin() * 1.5;
-            // height_offset -= ((global_fx * 0.25).cos() + (global_fz * 0.25).sin()).abs() * 2.0;
-            // height_offset += (global_fx * 0.7).sin() * (global_fz * 0.7).cos() * 0.5;
-
-            // // Set a global base height (e.g., ground level is at Y=32 across the whole world)
-            // let base_height = 32.0; 
-            
-            // // NO MORE CLAMPING! We want the true global height.
-            // // Using isize because terrain could technically dip below Y=0
-            // let global_surface_y = (base_height + height_offset).round() as isize; 
-            // let current_global_y = global_fy.round() as isize;
-
-            // // 2. CAVE SYSTEM
-            // let warp_x = global_fx + (global_fy * 0.2).sin() * 2.0;
-            // let warp_z = global_fz + (global_fy * 0.2).cos() * 2.0;
-
-            // let cave_density = (warp_x * 0.15).sin() 
-            //                  * (global_fy * 0.25).cos() 
-            //                  * (warp_z * 0.15).sin();
-            
-            // let is_cave = cave_density > 0.15;
-
-            // // 3. BLOCK PLACEMENT (Comparing Global to Global)
-            // // We now check if THIS block's absolute world position is below the world's surface
-            // if current_global_y <= global_surface_y && !is_cave {
-            //     let dirt_depth = 1.0 + ((global_fx * 0.2).sin() * 2.0).max(0.0);
-            //     let dirt_limit = global_surface_y - (dirt_depth.round() as isize);
-
-            //     let block_type = if current_global_y == global_surface_y {
-            //         BlockType::Grass
-            //     } else if current_global_y >= dirt_limit {
-            //         BlockType::Dirt
-            //     } else {
-            //         BlockType::Stone
-            //     };
-
-            //     // We still use local x, y, z to place it in the chunk's 16x16x16 array!
-            //     solid_blocks += 1;
-            //     self.blocks[x][y][z] = Block {
-            //         block_type,
-            //     }
-            // }
         }
 
         // safeguard against empty chunks
