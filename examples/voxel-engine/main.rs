@@ -6,11 +6,13 @@ use slime_engine::{
 };
 use std::time::Duration;
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin, Seedable};
+use rand::{Rng, SeedableRng, rngs::StdRng, RngExt};
 
 const CHUNK_SIZE_XZ: usize = 16; // x/z width of a chunk (must be divisible by 4)
 const CHUNK_SIZE_Y: usize = 128; // y height of a chunk (must be divisible by 8)
 const RENDER_DISTANCE: usize = 8; // render distance (square side length)
 const RENDER_HEIGHT: usize = 1; // how many chunks high to generate
+const SEED: u32 = 42;
 
 // helper functions
 fn rand_color() -> [f32; 4] {
@@ -18,6 +20,60 @@ fn rand_color() -> [f32; 4] {
 }
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
+}
+fn fade(t: f64) -> f64 {
+    t*t*t*(t*(t*6.0 - 15.0) + 10.0)
+}
+
+struct PerlinNoiseGenerator {
+    // holds random shuffled ints
+    table: [i32; 512],
+    // random offsets added to every coordinate
+    offset_x: f64,
+    offset_y: f64,
+    offset_z: f64,
+}
+
+impl PerlinNoiseGenerator {
+    // https://github.com/Spottedleaf/OldGenerator/blob/master/src/main/java/ca/spottedleaf/oldgenerator/generator/b173/noise/NoiseGeneratorPerlin173.java
+    // keeping some variable numbers for now for ease of porting (var1 -> v1)
+    fn new(rng: &mut StdRng) -> Self {
+        let mut table = [0; 512];
+        // random offsets
+        let offset_x = rng.random::<f64>() * 256.0_f64;
+        let offset_y = rng.random::<f64>() * 256.0_f64;
+        let offset_z = rng.random::<f64>() * 256.0_f64;
+
+        // fill first 256 with 0-255
+        for (i, val) in (0..256).enumerate() {
+            table[i] = val;
+        }
+
+        // fill first 256 with 0-255
+        let mut v2 = 0;
+        while v2 < 256 {
+            // pick random idx >= v2
+            let v3 = rng.random_range(0..(256 - v2)) + v2;
+            let v4 = table[v2];
+            table[v3] = v4;
+            table[v2 + 256] = table[v2]; // duplicate into upper half
+            v2 += 1;
+        }
+        
+        Self { table, offset_x, offset_y, offset_z }
+    }
+
+    fn gradient3(hash: i32, x: f64, y: f64, z: f64) -> f64 {
+        // computes gradient dot product
+        let h: i32 = hash & 15;
+        let v9: f64 =  if (h < 8) {x} else {y};
+        let v11: f64 =  if (h < 4) {y} else {
+            if (h != 12 && h != 14) {z} else {x}
+        };
+        let a: f64 = if (h & 1) == 0 {v9} else {-v9};
+        let b: f64 = if (h & 2) == 0 {v11} else {-v11};
+        a + b  
+    }
 }
 
 #[derive(Clone, Debug, Copy, PartialEq)]
@@ -65,7 +121,7 @@ impl Chunk {
     }
 
     fn generate_terrain(&mut self) {
-        const SEED: u32 = 42;
+        let random = StdRng::seed_from_u64(SEED as u64);
 
         let noise_min_limit   = Fbm::<Perlin>::new(SEED+1).set_octaves(16); // 'low' density bound
         let noise_max_limit    = Fbm::<Perlin>::new(SEED+2).set_octaves(16); // 'high' density bound
