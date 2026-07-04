@@ -5,14 +5,19 @@ use slime_engine::{
     App, Engine, WindowOptions, core::GraphicsContext, env_logger, input::Key, model::{Material, MaterialTextures, MaterialUniforms, Model, ModelVertex}, node::Node3D, pollster::block_on, primitives::Primitive, scene::{CameraId, ModelId, NodeId}, transform::Transform3D, window::Window,
 };
 use std::time::Duration;
-use noise::{NoiseFn, Perlin, Seedable};
+use noise::{Fbm, MultiFractal, NoiseFn, Perlin, Seedable};
 
-const CHUNK_SIZE: usize = 32; // x/z width of a chunk
+const CHUNK_SIZE_XZ: usize = 16; // x/z width of a chunk (must be divisible by 4)
+const CHUNK_SIZE_Y: usize = 128; // y height of a chunk (must be divisible by 8)
 const RENDER_DISTANCE: usize = 8; // render distance (square side length)
-const RENDER_HEIGHT: usize = 4; // how many chunks high to generate
+const RENDER_HEIGHT: usize = 1; // how many chunks high to generate
 
+// helper functions
 fn rand_color() -> [f32; 4] {
     [rand::random(), rand::random(), rand::random(), 1.0]
+}
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
 }
 
 #[derive(Clone, Debug, Copy, PartialEq)]
@@ -42,13 +47,13 @@ impl Block {
 #[derive(Clone, Debug, Copy)]
 struct Chunk {
     position: [usize; 3], // chunk position so *CHUNK_SIZE
-    blocks: [[[Block; CHUNK_SIZE]; CHUNK_SIZE]; CHUNK_SIZE],
+    blocks: [[[Block; CHUNK_SIZE_XZ]; CHUNK_SIZE_Y]; CHUNK_SIZE_XZ],
     is_empty: bool, // if all blocks are air
 }
 
 impl Chunk {
     fn new(position: [usize; 3]) -> Self {
-        let blocks = [[[Block::new(); CHUNK_SIZE]; CHUNK_SIZE]; CHUNK_SIZE];
+        let blocks = [[[Block::new(); CHUNK_SIZE_XZ]; CHUNK_SIZE_Y]; CHUNK_SIZE_XZ];
 
         let mut chunk = Self {
             position,
@@ -60,57 +65,151 @@ impl Chunk {
     }
 
     fn generate_terrain(&mut self) {
-        let perlin = Perlin::new(42);
+        const SEED: u32 = 42;
 
-        // density grid (cells of 4 horizontally, 8 vertically)
-        const DENSITY_WIDTH: usize = CHUNK_SIZE / 4 + 1;
-        const DENSITY_HEIGHT: usize = CHUNK_SIZE / 8 + 1;
-        let mut density_grid = [[[0.0; DENSITY_WIDTH]; DENSITY_HEIGHT]; DENSITY_WIDTH];
+        let noise_min_limit   = Fbm::<Perlin>::new(SEED+1).set_octaves(16); // 'low' density bound
+        let noise_max_limit    = Fbm::<Perlin>::new(SEED+2).set_octaves(16); // 'high' density bound
+        let noise_selector    = Fbm::<Perlin>::new(SEED+3).set_octaves(8); // lerp weight between low/high
+        let noise_beach       = Fbm::<Perlin>::new(SEED+4).set_octaves(4); // sand/gravel patches
+        let noise_surface_depth = Fbm::<Perlin>::new(SEED+5).set_octaves(4); // how deep dirt/sand layer is
+        let noise_scale       = Fbm::<Perlin>::new(SEED+6).set_octaves(10); // horizontal 'stretch' of terrain
+        let noise_depth       = Fbm::<Perlin>::new(SEED+7).set_octaves(16); // base elevation/depth
+        let noise_tree_count   = Fbm::<Perlin>::new(SEED+8).set_octaves(8); // tree density in populate
+
+        // how many density CELLS per chunk
+        const DENSITY_CELLS_XZ: usize = 4;
+        const DENSITY_CELLS_Y: usize = 8;
+        // how many density POINTS per chunk
+        const DENSITY_SAMPLES_XZ: usize = CHUNK_SIZE_XZ / DENSITY_CELLS_XZ + 1;
+        const DENSITY_SAMPLES_Y: usize = CHUNK_SIZE_Y / DENSITY_CELLS_Y + 1;
+        let mut density_grid = [[[0.0; DENSITY_SAMPLES_XZ]; DENSITY_SAMPLES_Y]; DENSITY_SAMPLES_XZ];
+        // const NOISE_SCALE_XZ: f64 = 684.412;
+        // const NOISE_SCALE_Y: f64 = 684.412;
+        const NOISE_SCALE_XZ: f64 = 0.5;
+        const NOISE_SCALE_Y:  f64 = 0.5;
+        const SEA_LEVEL: f64 = 64.0;
 
         // calculate density grid values
         for (x, density_x) in density_grid.iter_mut().enumerate() {
             for (y, density_y) in density_x.iter_mut().enumerate() {
-                for (z, density) in density_y.iter_mut().enumerate() {
+                for (z, density_value) in density_y.iter_mut().enumerate() {
                     // global coordinates
-                    let gx = (x as f64 * 4.0) + (self.position[0] * CHUNK_SIZE) as f64;
-                    let gy = (y as f64 * 8.0) + (self.position[1] * CHUNK_SIZE) as f64;
-                    let gz = (z as f64 * 4.0) + (self.position[2] * CHUNK_SIZE) as f64;
+                    let gx = (x as f64 * DENSITY_CELLS_XZ as f64) + (self.position[0] * CHUNK_SIZE_XZ) as f64;
+                    let gy = (y as f64 * DENSITY_CELLS_Y as f64) + (self.position[1] * CHUNK_SIZE_Y) as f64;
+                    let gz = (z as f64 * DENSITY_CELLS_XZ as f64) + (self.position[2] * CHUNK_SIZE_XZ) as f64;
 
-                    let frequency = 0.03;
-                    let value = perlin.get([
-                        gx * frequency,
-                        gy * frequency,
-                        gz * frequency,
+                    // 2d fields (per column) - control terrain shape
+                    let n_scale = noise_scale.get([
+                        gx * 1.121_f64,
+                        10.0_f64,
+                        gz * 1.121_f64,
+                    ]);
+                    let n_depth = noise_depth.get([
+                        gx * 200.0_f64,
+                        10.0_f64,
+                        gz * 200.0_f64,
                     ]);
 
-                    let sea_level = 63.0;
-                    let ground_level = 66.0;
-                    let k = 0.05;
-                    *density = value - (gy - ground_level) * k;
+                    // 3d fields (the density) - min/max's frequencies overflow at farlands here
+                    let n_selector  = noise_selector.get([
+                        gx * NOISE_SCALE_XZ * 0.5,
+                        gy * NOISE_SCALE_Y * 0.5,
+                        gz * NOISE_SCALE_XZ * 0.5,
+                        // gx * (NOISE_SCALE_XZ / 80.0_f64),
+                        // gy * (NOISE_SCALE_Y / 160.0_f64),
+                        // gz * (NOISE_SCALE_XZ / 80.0_f64),
+                    ]);
+                    let n_min_limit = noise_min_limit.get([
+                        gx * NOISE_SCALE_XZ,
+                        gy * NOISE_SCALE_Y,
+                        gz * NOISE_SCALE_XZ,
+                    ]);
+                    let n_max_limit = noise_max_limit.get([
+                        gx * NOISE_SCALE_XZ,
+                        gy * NOISE_SCALE_Y,
+                        gz * NOISE_SCALE_XZ,
+                    ]);
+
+
+                    // ---- PER-COLUMN NOISE ----
+
+                    // TODO humidity/temp
+
+                    // horizontal stretch - compresses vertical density gradient
+                    let mut horizontal_stretch = (n_scale + 256.0_f64) / 512.0_f64;
+                    horizontal_stretch = horizontal_stretch.min(1.0_f64);
+
+                    // elevation/depth
+                    let mut depth = n_depth / 1.0_f64; // 8000.0_f64
+                    if depth < 0.0_f64 { depth = -depth * 0.3_f64 }
+                    depth = depth * 3.0_f64 - 2.0_f64;
+                    if depth < 0.0_f64 {
+                        depth /= 2.0_f64;
+                        depth = depth.max(-1.0_f64);
+                        depth /= 1.4_f64;
+                        depth /= 2.0_f64;
+                        horizontal_stretch = 0.0_f64; // deep oceans get flattened
+                    } else {
+                        depth = depth.min(1.0_f64);
+                        depth /= 8.0_f64;
+                    }
+                    horizontal_stretch = horizontal_stretch.max(0.0_f64);
+                    horizontal_stretch += 0.5_f64;
+
+                    depth = depth * (DENSITY_SAMPLES_Y as f64) / 16.0_f64;
+                    // the Y (in samples) where density crosses zero
+                    let center_height = (DENSITY_SAMPLES_Y as f64) / 2.0_f64 + depth * 4.0_f64;
+
+                    // ---- PER-POINT NOISE ----
+
+                    // distance of this sample from center_height, scaled by stretch
+                    // below center is multiplied by 4 to fill underground
+                    let mut vertical_falloff = (y as f64 - center_height) * 12.0_f64 / horizontal_stretch;
+                    if vertical_falloff < 0.0_f64 { vertical_falloff *= 4.0_f64 }
+
+                    let min_density = n_min_limit / 1.0_f64; // 512.0_f64
+                    let max_density = n_max_limit / 1.0_f64; // 512.0_f64
+                    let selector = (n_selector / 10.0_f64 + 1.0_f64) / 2.0_f64;
+                    let mut density = lerp(
+                        min_density,
+                        max_density,
+                        selector.clamp(0.0_f64, 1.0_f64)
+                    ) - vertical_falloff;
+
+                    // force top 3 sample layers toward -10 so nothing generates at world height
+                    if y > DENSITY_SAMPLES_Y - 4 {
+                        let t = ((y - (DENSITY_SAMPLES_Y - 4)) as f32 / 3.0_f32) as f64;
+                        density = density * (1.0_f64 - t) + (-10.0_f64) * t;
+                    }
+
+                    *density_value = density;
                 }
             }
         }
 
+
+        // carve base terrain
+
         let mut solid_blocks = 0;
-        for i in 0..(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) {
-            let x = i % CHUNK_SIZE;
-            let y = (i / CHUNK_SIZE) % CHUNK_SIZE;
-            let z = i / (CHUNK_SIZE * CHUNK_SIZE);
+        for i in 0..(CHUNK_SIZE_XZ * CHUNK_SIZE_Y * CHUNK_SIZE_XZ) {
+            let x = i % CHUNK_SIZE_XZ;
+            let y = (i / CHUNK_SIZE_XZ) % CHUNK_SIZE_Y;
+            let z = i / (CHUNK_SIZE_XZ * CHUNK_SIZE_Y);
 
             // global coordinates
-            let gx = x as f64 + (self.position[0] * CHUNK_SIZE) as f64;
-            let gy = y as f64 + (self.position[1] * CHUNK_SIZE) as f64;
-            let gz = z as f64 + (self.position[2] * CHUNK_SIZE) as f64;
+            let gx = x as f64 + (self.position[0] * CHUNK_SIZE_XZ) as f64;
+            let gy = y as f64 + (self.position[1] * CHUNK_SIZE_Y) as f64;
+            let gz = z as f64 + (self.position[2] * CHUNK_SIZE_XZ) as f64;
 
             // which density grid cell
-            let cx = x / 4;
-            let cy = y / 8;
-            let cz = z / 4;
+            let cx = x / DENSITY_CELLS_XZ;
+            let cy = y / DENSITY_CELLS_Y;
+            let cz = z / DENSITY_CELLS_XZ;
 
             // position inside density grid cell
-            let dx = (x % 4) as f64 / 4.0;
-            let dy = (y % 8) as f64 / 8.0;
-            let dz = (z % 4) as f64 / 4.0;
+            let dx = (x % DENSITY_CELLS_XZ) as f64 / DENSITY_CELLS_XZ as f64;
+            let dy = (y % DENSITY_CELLS_Y) as f64 / DENSITY_CELLS_Y as f64;
+            let dz = (z % DENSITY_CELLS_XZ) as f64 / DENSITY_CELLS_XZ as f64;
 
             // grab density grid corners
             let c000 = density_grid[cx  ][cy  ][cz  ];
@@ -122,19 +221,14 @@ impl Chunk {
             let c110 = density_grid[cx+1][cy+1][cz  ];
             let c111 = density_grid[cx+1][cy+1][cz+1];
 
-            // liner interpolation
-            fn lerp(a: f64, b: f64, t: f64) -> f64 {
-                a + (b - a) * t
-            }
-
             // trilinear interpolation
             let x00 = lerp(c000, c100, dx);
             let x10 = lerp(c010, c110, dx);
             let x01 = lerp(c001, c101, dx);
             let x11 = lerp(c011, c111, dx);
-            let z0 = lerp(x00, x10, dy);
-            let z1 = lerp(x01, x11, dy);
-            let density = lerp(z0, z1, dz);
+            let y0 = lerp(x00, x10, dy);
+            let y1 = lerp(x01, x11, dy);
+            let density = lerp(y0, y1, dz);
 
             if density > 0.0 {
                 solid_blocks += 1;
@@ -170,9 +264,9 @@ impl Chunk {
         ];
         let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
 
-        for x in 0..CHUNK_SIZE {
-            for y in 0..CHUNK_SIZE {
-                for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE_XZ {
+            for y in 0..CHUNK_SIZE_Y {
+                for z in 0..CHUNK_SIZE_XZ {
                     // dont render air
                     if self.blocks[x][y][z].block_type == BlockType::Air {
                         continue;
@@ -258,7 +352,7 @@ impl App for ExampleScene {
         let layout = &engine.renderer.texture_bind_group_layout;
 
         let camera = engine.scene.spawn_camera(
-            [-10.0, 20.0, -10.0],
+            [-10.0, 100.0, -10.0],
             45.0,
             -20.0
         );
@@ -280,8 +374,9 @@ impl App for ExampleScene {
                     engine.scene.spawn_node(
                         Node3D::new(Some(chunk_model_id)).with_transform(
                             Transform3D::new()
-                                .with_position([(x * CHUNK_SIZE) as f32, (y * CHUNK_SIZE) as f32, (z * CHUNK_SIZE) as f32])
-                        ).with_color(rand_color())
+                                .with_position([(x * CHUNK_SIZE_XZ) as f32, (y * CHUNK_SIZE_Y) as f32, (z * CHUNK_SIZE_XZ) as f32])
+                        )
+                        // .with_color(rand_color())
                     );
                 }
             }
