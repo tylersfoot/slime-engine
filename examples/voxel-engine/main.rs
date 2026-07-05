@@ -10,7 +10,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng, RngExt};
 
 const CHUNK_SIZE_XZ: usize = 16; // x/z width of a chunk (must be divisible by 4)
 const CHUNK_SIZE_Y: usize = 128; // y height of a chunk (must be divisible by 8)
-const RENDER_DISTANCE: usize = 6; // render distance (square side length)
+const RENDER_DISTANCE: usize = 32; // render distance (square side length)
 const RENDER_HEIGHT: usize = 1; // how many chunks high to generate
 const SEED: u32 = 42;
 
@@ -797,17 +797,17 @@ impl Chunk {
         let color = [0.4, 0.4, 0.4];
 
         let mut vertices = Vec::new();
-        let mut indices: Vec<i32> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
 
         // local cube data
         let face_data = [
-            // (normal, [corner; 4])
-            ([ 0.0,  0.0,  1.0], [[-0.5, -0.5,  0.5], [ 0.5, -0.5,  0.5], [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5]]), // front  (+Z)
-            ([ 0.0,  0.0, -1.0], [[ 0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5,  0.5, -0.5], [ 0.5,  0.5, -0.5]]), // back   (-Z)
-            ([ 1.0,  0.0,  0.0], [[ 0.5, -0.5,  0.5], [ 0.5, -0.5, -0.5], [ 0.5,  0.5, -0.5], [ 0.5,  0.5,  0.5]]), // right  (+X)
-            ([-1.0,  0.0,  0.0], [[-0.5, -0.5, -0.5], [-0.5, -0.5,  0.5], [-0.5,  0.5,  0.5], [-0.5,  0.5, -0.5]]), // left   (-X)
-            ([ 0.0,  1.0,  0.0], [[-0.5,  0.5,  0.5], [ 0.5,  0.5,  0.5], [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5]]), // top    (+Y)
-            ([ 0.0, -1.0,  0.0], [[-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5], [ 0.5, -0.5,  0.5], [-0.5, -0.5,  0.5]]), // bottom (-Y)
+            // (normal, neighbor_offset, [corner; 4])
+            ([ 0.0,  0.0,  1.0], ( 0,  0,  1), [[-0.5, -0.5,  0.5], [ 0.5, -0.5,  0.5], [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5]]), // front  (+Z)
+            ([ 0.0,  0.0, -1.0], ( 0,  0, -1), [[ 0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5,  0.5, -0.5], [ 0.5,  0.5, -0.5]]), // back   (-Z)
+            ([ 1.0,  0.0,  0.0], ( 1,  0,  0), [[ 0.5, -0.5,  0.5], [ 0.5, -0.5, -0.5], [ 0.5,  0.5, -0.5], [ 0.5,  0.5,  0.5]]), // right  (+X)
+            ([-1.0,  0.0,  0.0], (-1,  0,  0), [[-0.5, -0.5, -0.5], [-0.5, -0.5,  0.5], [-0.5,  0.5,  0.5], [-0.5,  0.5, -0.5]]), // left   (-X)
+            ([ 0.0,  1.0,  0.0], ( 0,  1,  0), [[-0.5,  0.5,  0.5], [ 0.5,  0.5,  0.5], [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5]]), // top    (+Y)
+            ([ 0.0, -1.0,  0.0], ( 0, -1,  0), [[-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5], [ 0.5, -0.5,  0.5], [-0.5, -0.5,  0.5]]), // bottom (-Y)
         ];
         let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
 
@@ -820,9 +820,17 @@ impl Chunk {
                     }
 
                     let (fx, fy, fz) = (x as f32, y as f32, z as f32);
-                    for (normal, corners) in face_data {
+                    for (normal, (ox, oy, oz), corners) in face_data {
+                        // dont render face if against another solid block
+                        let nx = x as i32 + ox;
+                        let ny = y as i32 + oy;
+                        let nz = z as i32 + oz;
+                        if self.is_solid(nx, ny, nz) {
+                            continue;
+                        }
+                        
                         // index of first vertex of THIS face
-                        let base = vertices.len() as i32;
+                        let base = vertices.len() as u32;
                         
                         for i in 0..4 {
                             vertices.push(ModelVertex {
@@ -880,6 +888,17 @@ impl Chunk {
         //         }
         //     }
         // }
+    }
+
+    fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
+        // out of bounds = treat as air
+        if x < 0 || y < 0 || z < 0
+            || x >= CHUNK_SIZE_XZ as i32
+            || y >= CHUNK_SIZE_Y as i32
+            || z >= CHUNK_SIZE_XZ as i32 {
+            return false;
+        }
+        self.blocks[x as usize][y as usize][z as usize].block_type != BlockType::Air
     }
 }
 

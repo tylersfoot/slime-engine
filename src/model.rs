@@ -373,7 +373,7 @@ impl Model {
         device: &wgpu::Device,
         name: &str,
         vertices: &[ModelVertex],
-        indices: &[i32],
+        indices: &[u32],
         material: Material,
     ) -> Self {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
