@@ -10,23 +10,126 @@ use rand::{Rng, SeedableRng, rngs::StdRng, RngExt};
 
 const CHUNK_SIZE_XZ: usize = 16; // x/z width of a chunk (must be divisible by 4)
 const CHUNK_SIZE_Y: usize = 128; // y height of a chunk (must be divisible by 8)
-const RENDER_DISTANCE: usize = 8; // render distance (square side length)
+const RENDER_DISTANCE: usize = 6; // render distance (square side length)
 const RENDER_HEIGHT: usize = 1; // how many chunks high to generate
 const SEED: u32 = 42;
 
 // helper functions
-fn rand_color() -> [f32; 4] {
-    [rand::random(), rand::random(), rand::random(), 1.0]
+fn rand_color(rng: &mut StdRng) -> [f32; 4] {
+    [rng.random(), rng.random(), rng.random(), 1.0]
 }
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 fn fade(t: f64) -> f64 {
-    t*t*t*(t*(t*6.0 - 15.0) + 10.0)
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
-struct PerlinNoiseGenerator {
-    // holds random shuffled ints
+#[derive(Clone, Debug)]
+struct NoiseGeneratorOctaves {
+    octaves: Vec<NoiseGeneratorPerlin>,
+    total_octaves: usize,
+}
+
+impl NoiseGeneratorOctaves {
+    fn new(rng: &mut StdRng, count: usize) -> Self {
+        let mut generator = Self {
+            octaves: vec![],
+            total_octaves: count,
+        };
+
+        for i in 0..count {
+            generator.octaves.insert(i, NoiseGeneratorPerlin::new(rng));
+        }
+
+        generator
+    }
+
+    fn generate_noise_for_coordinate(&self, var1: f64, var3: f64) -> f64 {
+        let mut var5: f64 = 0.0_f64;
+        let mut var7: f64 = 1.0_f64;
+
+        for var9 in 0..self.total_octaves {
+            var5 += self.octaves[var9].sample_point(var1 * var7, var3 * var7, 0.0) / var7;
+            var7 /= 2.0_f64;
+        }
+
+        var5
+    }
+
+    // public double[] generateNoise(double[] var1, double var2, double var4, double var6, int var8, int var9, int var10, double var11, double var13, double var15) {
+    //     if (var1 == null) {
+    //         var1 = new double[var8 * var9 * var10];
+    //     } else {
+    //         for(int var17 = 0; var17 < var1.length; ++var17) {
+    //             var1[var17] = 0.0D;
+    //         }
+    //     }
+
+    //     double var20 = 1.0D;
+
+    //     for(int var19 = 0; var19 < this.totalNoiseGenerators; ++var19) {
+    //         this.noiseGenerators[var19].a(var1, var2, var4, var6, var8, var9, var10, var11 * var20, var13 * var20, var15 * var20, var20);
+    //         var20 /= 2.0D;
+    //     }
+
+    //     return var1;
+    // }
+
+    fn generate_noise(&self, out: Vec<f64>, 
+        var2: f64, var4: f64, var6: f64,
+        var8: i32, var9: i32, var10: i32,
+        var11: f64, var13: f64, var15: f64) -> Vec<f64> {
+
+        let mut out = vec![0.0_f64; (var8 * var9 * var10) as usize];
+        let mut scale: f64 = 1.0_f64;
+
+        for octave in 0..self.total_octaves {
+            out = self.octaves[octave].sample_grid(
+                out,
+                var2, var4, var6,
+                var8, var9, var10,
+                var11 * scale, var13 * scale, var15 * scale,
+                scale
+            );
+            scale /= 2.0_f64;
+        }
+
+        out
+    }
+
+    fn generate_noise2(&self, out: Vec<f64>, 
+        var2: i32, var3: i32, var4: i32, var5: i32,
+        var6: f64, var8: f64, var10: f64) -> Vec<f64> {
+        self.generate_noise(
+            out,
+            var2 as f64,
+            10.0,
+            var3 as f64,
+            var4,
+            1,
+            var5,
+            var6,
+            1.0,
+            var8
+        )
+    }
+
+    fn sample_point_fbm(&self, x: f64, y: f64, z: f64) -> f64 {
+        let mut total = 0.0_f64;
+        let mut scale = 1.0_f64;
+        for octave in &self.octaves {
+            // mc weighting: freq *= scale (halves), result /= scale (amplitude grows)
+            total += octave.sample_point(x * scale, y * scale, z * scale) / scale;
+            scale /= 2.0_f64;
+        }
+        total
+    }
+}
+
+#[derive(Clone, Debug, Copy)]
+struct NoiseGeneratorPerlin {
+    // permutation table; holds random shuffled ints
     table: [i32; 512],
     // random offsets added to every coordinate
     offset_x: f64,
@@ -34,7 +137,7 @@ struct PerlinNoiseGenerator {
     offset_z: f64,
 }
 
-impl PerlinNoiseGenerator {
+impl NoiseGeneratorPerlin {
     // https://github.com/Spottedleaf/OldGenerator/blob/master/src/main/java/ca/spottedleaf/oldgenerator/generator/b173/noise/NoiseGeneratorPerlin173.java
     // keeping some variable numbers for now for ease of porting (var1 -> v1)
     fn new(rng: &mut StdRng) -> Self {
@@ -54,8 +157,7 @@ impl PerlinNoiseGenerator {
         while v2 < 256 {
             // pick random idx >= v2
             let v3 = rng.random_range(0..(256 - v2)) + v2;
-            let v4 = table[v2];
-            table[v3] = v4;
+            table.swap(v2, v3);
             table[v2 + 256] = table[v2]; // duplicate into upper half
             v2 += 1;
         }
@@ -63,16 +165,399 @@ impl PerlinNoiseGenerator {
         Self { table, offset_x, offset_y, offset_z }
     }
 
-    fn gradient3(hash: i32, x: f64, y: f64, z: f64) -> f64 {
-        // computes gradient dot product
+    fn gradient3(&self, hash: i32, x: f64, y: f64, z: f64) -> f64 {
+        // computes 3D gradient dot product
         let h: i32 = hash & 15;
-        let v9: f64 =  if (h < 8) {x} else {y};
-        let v11: f64 =  if (h < 4) {y} else {
+        let v1: f64 =  if (h < 8) {x} else {y};
+        let v2: f64 =  if (h < 4) {y} else {
             if (h != 12 && h != 14) {z} else {x}
         };
-        let a: f64 = if (h & 1) == 0 {v9} else {-v9};
-        let b: f64 = if (h & 2) == 0 {v11} else {-v11};
-        a + b  
+        let v3: f64 = if (h & 1) == 0 {v1} else {-v1};
+        let v4: f64 = if (h & 2) == 0 {v2} else {-v2};
+        v3 + v4  
+    }
+
+    fn gradient2(&self, hash: i32, x: f64, y: f64) -> f64 {
+        // computes 2D gradient dot product
+        let h: i32 = hash & 15;
+        let v1: f64 = (1 - ((h & 8) >> 3)) as f64 * x;
+        let v2: f64 =  if (h < 4) {0.0_f64} else {
+            if (h != 12 && h != 14) {y} else {x}
+        };
+        let v3: f64 = if ((h & 1) == 0) {v1} else {-v1};
+        let v4: f64 = if ((h & 2) == 0) {v2} else {-v2};
+        v3 + v4
+    }
+
+    fn sample_point(&self, mut x: f64, mut y: f64, mut z: f64) -> f64 {
+        // // apply generator's random origin offset
+        // x += self.offset_x;
+        // y += self.offset_y;
+        // z += self.offset_z;
+        // // cast to ints (this is what causes the farlands)
+        // let mut xi: i32 = x as i32;
+        // let mut yi: i32 = y as i32;
+        // let mut zi: i32 = z as i32;
+        // if (x < xi as f64) {
+        //     xi -= 1;
+        // }
+        // if (y < yi as f64) {
+        //     yi -= 1;
+        // }
+        // if (z < zi as f64) {
+        //     zi -= 1;
+        // }
+        // let var16: i32 = xi & 255;
+        // let var17: i32 = yi & 255;
+        // let var18: i32 = zi & 255;
+        // x -= xi as f64;
+        // y -= yi as f64;
+        // z -= zi as f64;
+        // let var19: f64 = x * x * x * (x * (x * 6.0_f64 - 15.0_f64) + 10.0_f64);
+        // let var21: f64 = y * y * y * (y * (y * 6.0_f64 - 15.0_f64) + 10.0_f64);
+        // let var23: f64 = z * z * z * (z * (z * 6.0_f64 - 15.0_f64) + 10.0_f64);
+        // let var25: i32 = self.table[var16 as usize] + var17;
+        // let var26: i32 = self.table[var25 as usize] + var18;
+        // let var27: i32 = self.table[var25 as usize + 1] + var18;
+        // let var28: i32 = self.table[var16 as usize + 1] + var17;
+        // let var29: i32 = self.table[var28 as usize] + var18;
+        // let var30: i32 = self.table[var28 as usize + 1] + var18;
+        // return lerp(
+        //     lerp(
+        //         lerp(
+                    
+        //             self.gradient3(
+        //                 self.table[var26 as usize],
+        //                 x,
+        //                 y,
+        //                 z
+        //             ),
+        //             self.gradient3(
+        //                 self.table[var29 as usize],
+        //                 x - 1.0_f64,
+        //                 y,
+        //                 z
+        //             ),
+        //             var19,
+        //         ),
+        //         lerp(
+        //             self.gradient3(
+        //                 self.table[var27 as usize],
+        //                 x,
+        //                 y - 1.0_f64,
+        //                 z
+        //             ),
+        //             self.gradient3(
+        //                 self.table[var30 as usize],
+        //                 x - 1.0_f64,
+        //                 y - 1.0_f64,
+        //                 z
+        //             ),
+        //             var19,
+        //         ),
+        //         var21,
+        //     ),
+        //     lerp(
+        //         lerp(
+        //             self.gradient3(
+        //                 self.table[var26 as usize + 1],
+        //                 x,
+        //                 y,
+        //                 z - 1.0_f64
+        //             ),
+        //             self.gradient3(
+        //                 self.table[var29 as usize + 1],
+        //                 x - 1.0_f64,
+        //                 y,
+        //                 z - 1.0_f64
+        //             ),
+        //             var19,
+        //         ),
+        //         lerp(
+        //             self.gradient3(
+        //                 self.table[var27 as usize + 1],
+        //                 x,
+        //                 y - 1.0_f64,
+        //                 z - 1.0_f64
+        //             ),
+        //             self.gradient3(
+        //                 self.table[var30 as usize + 1],
+        //                 x - 1.0_f64,
+        //                 y - 1.0_f64,
+        //                 z - 1.0_f64
+        //             ),
+        //             var19,
+        //         ),
+        //         var21,
+        //     ),
+        //     var23,
+        // );
+
+        let mut var7: f64 = x + self.offset_x;
+        let mut var9: f64 = y + self.offset_y;
+        let mut var11: f64 = z + self.offset_z;
+        let mut var13: i32 = var7 as i32;
+        let mut var14: i32 = var9 as i32;
+        let mut var15: i32 = var11 as i32;
+        if (var7 < var13 as f64) {
+            var13 -= 1;
+        }
+        if (var9 < var14 as f64) {
+            var14 -= 1;
+        }
+        if (var11 < var15 as f64) {
+            var15 -= 1;
+        }
+        let var16: i32 = var13 & 255;
+        let var17: i32 = var14 & 255;
+        let var18: i32 = var15 & 255;
+        var7 -= var13 as f64;
+        var9 -= var14 as f64;
+        var11 -= var15 as f64;
+        let var19: f64 = var7 * var7 * var7 * (var7 * (var7 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+        let var21: f64 = var9 * var9 * var9 * (var9 * (var9 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+        let var23: f64 = var11 * var11 * var11 * (var11 * (var11 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+        let var25: i32 = self.table[var16 as usize] + var17;
+        let var26: i32 = self.table[var25 as usize] + var18;
+        let var27: i32 = self.table[var25 as usize + 1] + var18;
+        let var28: i32 = self.table[var16 as usize + 1] + var17;
+        let var29: i32 = self.table[var28 as usize] + var18;
+        let var30: i32 = self.table[var28 as usize + 1] + var18;
+        lerp(
+            lerp(
+                lerp(
+                    
+                    self.gradient3(
+                        self.table[var26 as usize],
+                        var7,
+                        var9,
+                        var11
+                    ),
+                    self.gradient3(
+                        self.table[var29 as usize],
+                        var7 - 1.0_f64,
+                        var9,
+                        var11
+                    ),
+                    var19,
+                ),
+                lerp(
+                    self.gradient3(
+                        self.table[var27 as usize],
+                        var7,
+                        var9 - 1.0_f64,
+                        var11
+                    ),
+                    self.gradient3(
+                        self.table[var30 as usize],
+                        var7 - 1.0_f64,
+                        var9 - 1.0_f64,
+                        var11
+                    ),
+                    var19,
+                ),
+                var21,
+            ),
+            lerp(
+                lerp(
+                    self.gradient3(
+                        self.table[var26 as usize + 1],
+                        var7,
+                        var9,
+                        var11 - 1.0_f64
+                    ),
+                    self.gradient3(
+                        self.table[var29 as usize + 1],
+                        var7 - 1.0_f64,
+                        var9,
+                        var11 - 1.0_f64
+                    ),
+                    var19,
+                ),
+                lerp(
+                    self.gradient3(
+                        self.table[var27 as usize + 1],
+                        var7,
+                        var9 - 1.0_f64,
+                        var11 - 1.0_f64
+                    ),
+                    self.gradient3(
+                        self.table[var30 as usize + 1],
+                        var7 - 1.0_f64,
+                        var9 - 1.0_f64,
+                        var11 - 1.0_f64
+                    ),
+                    var19,
+                ),
+                var21,
+            ),
+            var23,
+        )
+    }
+
+    fn sample_grid(&self, out: Vec<f64>,
+        var2: f64, var4: f64, var6: f64, 
+        var8: i32, var9: i32, var10: i32, 
+        var11: f64, var13: f64, var15: f64,
+        var17: f64) -> Vec<f64> {
+        // we return new vec instead of editing given vec
+        let mut out = out.clone();
+        let mut var19: i32;
+        let mut var20: i32;
+        let mut var21: f64;
+        let mut var23: f64;
+        let mut var25: f64;
+        let mut var27: i32;
+        let mut var28: f64;
+        let mut var30: i32;
+        let mut var31: i32;
+        let mut var32: i32;
+        let mut var33: i32;
+        let mut var36: bool;
+        let mut var37: bool;
+        let mut var42: f64;
+        let mut var46: i32;
+        if (var9 == 1) {
+            let var34: bool = false;
+            let var35: bool = false;
+            var36 = false;
+            var37 = false;
+            let mut var38: f64 = 0.0_f64;
+            let mut var40: f64 = 0.0_f64;
+            var33 = 0;
+            var42 = 1.0_f64 / var17;
+
+            for var44 in 0..var8 {
+                var21 = (var2 + var44 as f64) * var11 + self.offset_x;
+                let mut var45: i32 = var21 as i32;
+                if (var21 < var45 as f64) {
+                    var45 -= 1;
+                }
+
+                var46 = var45 & 255;
+                var21 -= var45 as f64;
+                var23 = var21 * var21 * var21 * (var21 * (var21 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+
+                for var27 in 0..var10 {
+                    var25 = (var6 + var27 as f64) * var15 + self.offset_z;
+                    var30 = var25 as i32;
+                    if (var25 < var30 as f64) {
+                        var30 -= 1;
+                    }
+
+                    var31 = var30 & 255;
+                    var25 -= var30 as f64;
+                    var28 = var25 * var25 * var25 * (var25 * (var25 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+                    var19 = self.table[var46 as usize]; // + 0
+                    let var47: i32 = self.table[var19 as usize] + var31;
+                    let var48: i32 = self.table[var46 as usize + 1]; // + 0
+                    var20 = self.table[var48 as usize] + var31;
+                    var38 = lerp(
+                        self.gradient2(self.table[var47 as usize], var21, var25),
+                        self.gradient3(self.table[var20 as usize], var21 - 1.0_f64, 0.0_f64, var25),
+                        var23,
+                    );
+                    var40 = lerp(
+                        self.gradient3(self.table[var47 as usize + 1], var21, 0.0_f64, var25 - 1.0_f64),
+                        self.gradient3(self.table[var20 as usize + 1], var21 - 1.0_f64, 0.0_f64, var25 - 1.0_f64),
+                        var23,
+                    );
+                    let var49: f64 = lerp(var38, var40, var28);
+                    var32 = var33;
+                    var33 += 1;
+                    out[var32 as usize] += var49 * var42;
+                }
+            }
+        } else {
+            var19 = 0;
+            let var66: f64 = 1.0_f64 / var17;
+            var20 = -1;
+            var36 = false;
+            var37 = false;
+            let var67: bool = false;
+            let var39: bool = false;
+            let var68: bool = false;
+            let var41: bool = false;
+            var42 = 0.0_f64;
+            var21 = 0.0_f64;
+            let mut var69: f64 = 0.0_f64;
+            var23 = 0.0_f64;
+
+            for var27 in 0..var8 {
+                var25 = (var2 + var27 as f64) * var11 + self.offset_x;
+                var30 = var25 as i32;
+                if (var25 < var30 as f64) {
+                    var30 -= 1;
+                }
+
+                var31 = var30 & 255;
+                var25 -= var30 as f64;
+                var28 = var25 * var25 * var25 * (var25 * (var25 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+
+                for var46 in 0..var10 {
+                    let mut var70: f64 = (var6 + var46 as f64) * var15 + self.offset_z;
+                    let mut var71: i32 = var70 as i32;
+                    if (var70 < var71 as f64) {
+                        var71 -= 1;
+                    }
+
+                    let var50: i32 = var71 & 255;
+                    var70 -= var71 as f64;
+                    let var51: f64 = var70 * var70 * var70 * (var70 * (var70 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+
+                    for var53 in 0..var9 {
+                        let mut var54: f64 = (var4 + var53 as f64) * var13 + self.offset_y;
+                        let mut var56: i32 = var54 as i32;
+                        if (var54 < var56 as f64) {
+                            var56 -= 1;
+                        }
+
+                        let var57: i32 = var56 & 255;
+                        var54 -= var56 as f64;
+                        let var58: f64 = var54 * var54 * var54 * (var54 * (var54 * 6.0_f64 - 15.0_f64) + 10.0_f64);
+                        if (var53 == 0 || var57 != var20) {
+                            var20 = var57;
+                            let var60: i32 = self.table[var31 as usize] + var57;
+                            let var61: i32 = self.table[var60 as usize] + var50;
+                            let var62: i32 = self.table[var60 as usize + 1] + var50;
+                            let var63: i32 = self.table[var31 as usize + 1] + var57;
+                            var33 = self.table[var63 as usize] + var50;
+                            let var64: i32 = self.table[var63 as usize + 1] + var50;
+                            var42 = lerp(
+                                
+                                self.gradient3(self.table[var61 as usize], var25, var54, var70),
+                                self.gradient3(self.table[var33 as usize], var25 - 1.0_f64, var54, var70),
+                                var28,
+                            );
+                            var21 = lerp(
+                                self.gradient3(self.table[var62 as usize], var25, var54 - 1.0_f64, var70),
+                                self.gradient3(self.table[var64 as usize], var25 - 1.0_f64, var54 - 1.0_f64, var70),
+                                var28,
+                            );
+                            var69 = lerp(
+                                self.gradient3(self.table[var61 as usize + 1], var25, var54, var70 - 1.0_f64),
+                                self.gradient3(self.table[var33 as usize + 1], var25 - 1.0_f64, var54, var70 - 1.0_f64),
+                                var28,
+                            );
+                            var23 = lerp(
+                                self.gradient3(self.table[var62 as usize + 1], var25, var54 - 1.0_f64, var70 - 1.0_f64),
+                                self.gradient3(self.table[var64 as usize + 1], var25 - 1.0_f64, var54 - 1.0_f64, var70 - 1.0_f64),
+                                var28,
+                            );
+                        }
+
+                        let var72: f64 = lerp(var42, var21, var58);
+                        let var73: f64 = lerp(var69, var23, var58);
+                        let var74: f64 = lerp(var72, var73, var51);
+                        var32 = var19;
+                        var19 += 1;
+                        out[var32 as usize] += var74 * var66;
+                    }
+                }
+            }
+        }
+
+        out
     }
 }
 
@@ -121,16 +606,25 @@ impl Chunk {
     }
 
     fn generate_terrain(&mut self) {
-        let random = StdRng::seed_from_u64(SEED as u64);
+        let mut rng = StdRng::seed_from_u64(SEED as u64);
 
-        let noise_min_limit   = Fbm::<Perlin>::new(SEED+1).set_octaves(16); // 'low' density bound
-        let noise_max_limit    = Fbm::<Perlin>::new(SEED+2).set_octaves(16); // 'high' density bound
-        let noise_selector    = Fbm::<Perlin>::new(SEED+3).set_octaves(8); // lerp weight between low/high
-        let noise_beach       = Fbm::<Perlin>::new(SEED+4).set_octaves(4); // sand/gravel patches
-        let noise_surface_depth = Fbm::<Perlin>::new(SEED+5).set_octaves(4); // how deep dirt/sand layer is
-        let noise_scale       = Fbm::<Perlin>::new(SEED+6).set_octaves(10); // horizontal 'stretch' of terrain
-        let noise_depth       = Fbm::<Perlin>::new(SEED+7).set_octaves(16); // base elevation/depth
-        let noise_tree_count   = Fbm::<Perlin>::new(SEED+8).set_octaves(8); // tree density in populate
+        let noise_min_limit = NoiseGeneratorOctaves::new(&mut rng, 16); // 'low' density bound
+        let noise_max_limit  = NoiseGeneratorOctaves::new(&mut rng, 16); // 'high' density bound
+        let noise_selector = NoiseGeneratorOctaves::new(&mut rng, 8); // lerp weight between low/high
+        let noise_beach = NoiseGeneratorOctaves::new(&mut rng, 4); // sand/gravel patches
+        let noise_surface_depth  = NoiseGeneratorOctaves::new(&mut rng, 4); // how deep dirt/sand layer is
+        let noise_scale = NoiseGeneratorOctaves::new(&mut rng, 10); // horizontal 'stretch' of terrain
+        let noise_depth = NoiseGeneratorOctaves::new(&mut rng, 16); // base elevation/depth
+        let noise_tree_count = NoiseGeneratorOctaves::new(&mut rng, 8); // tree density in populate
+
+        // let noise_min_limit = Fbm::<Perlin>::new(SEED+1).set_octaves(16); // 'low' density bound
+        // let noise_max_limit = Fbm::<Perlin>::new(SEED+2).set_octaves(16); // 'high' density bound
+        // let noise_selector = Fbm::<Perlin>::new(SEED+3).set_octaves(8); // lerp weight between low/high
+        // let noise_beach = Fbm::<Perlin>::new(SEED+4).set_octaves(4); // sand/gravel patches
+        // let noise_surface_depth = Fbm::<Perlin>::new(SEED+5).set_octaves(4); // how deep dirt/sand layer is
+        // let noise_scale = Fbm::<Perlin>::new(SEED+6).set_octaves(10); // horizontal 'stretch' of terrain
+        // let noise_depth = Fbm::<Perlin>::new(SEED+7).set_octaves(16); // base elevation/depth
+        // let noise_tree_count = Fbm::<Perlin>::new(SEED+8).set_octaves(8); // tree density in populate
 
         // how many density CELLS per chunk
         const DENSITY_CELLS_XZ: usize = 4;
@@ -139,10 +633,8 @@ impl Chunk {
         const DENSITY_SAMPLES_XZ: usize = CHUNK_SIZE_XZ / DENSITY_CELLS_XZ + 1;
         const DENSITY_SAMPLES_Y: usize = CHUNK_SIZE_Y / DENSITY_CELLS_Y + 1;
         let mut density_grid = [[[0.0; DENSITY_SAMPLES_XZ]; DENSITY_SAMPLES_Y]; DENSITY_SAMPLES_XZ];
-        // const NOISE_SCALE_XZ: f64 = 684.412;
-        // const NOISE_SCALE_Y: f64 = 684.412;
-        const NOISE_SCALE_XZ: f64 = 0.5;
-        const NOISE_SCALE_Y:  f64 = 0.5;
+        const NOISE_SCALE_XZ: f64 = 684.412;
+        const NOISE_SCALE_Y: f64 = 684.412;
         const SEA_LEVEL: f64 = 64.0;
 
         // calculate density grid values
@@ -150,42 +642,41 @@ impl Chunk {
             for (y, density_y) in density_x.iter_mut().enumerate() {
                 for (z, density_value) in density_y.iter_mut().enumerate() {
                     // global coordinates
-                    let gx = (x as f64 * DENSITY_CELLS_XZ as f64) + (self.position[0] * CHUNK_SIZE_XZ) as f64;
-                    let gy = (y as f64 * DENSITY_CELLS_Y as f64) + (self.position[1] * CHUNK_SIZE_Y) as f64;
-                    let gz = (z as f64 * DENSITY_CELLS_XZ as f64) + (self.position[2] * CHUNK_SIZE_XZ) as f64;
+                    // let gx = (x as f64 * DENSITY_CELLS_XZ as f64) + (self.position[0] * CHUNK_SIZE_XZ) as f64;
+                    // let gy = (y as f64 * DENSITY_CELLS_Y as f64) + (self.position[1] * CHUNK_SIZE_Y) as f64;
+                    // let gz = (z as f64 * DENSITY_CELLS_XZ as f64) + (self.position[2] * CHUNK_SIZE_XZ) as f64;
+                    let gx = (x as f64) + (self.position[0] * DENSITY_CELLS_XZ) as f64;
+                    let gy = (y as f64) + (self.position[1] * DENSITY_CELLS_Y) as f64;
+                    let gz = (z as f64) + (self.position[2] * DENSITY_CELLS_XZ) as f64;
 
                     // 2d fields (per column) - control terrain shape
-                    let n_scale = noise_scale.get([
+                    let n_scale = noise_scale.sample_point_fbm(
                         gx * 1.121_f64,
                         10.0_f64,
-                        gz * 1.121_f64,
-                    ]);
-                    let n_depth = noise_depth.get([
+                        gz * 1.121_f64
+                    );
+                    let n_depth = noise_depth.sample_point_fbm(
                         gx * 200.0_f64,
                         10.0_f64,
                         gz * 200.0_f64,
-                    ]);
+                    );
 
                     // 3d fields (the density) - min/max's frequencies overflow at farlands here
-                    let n_selector  = noise_selector.get([
-                        gx * NOISE_SCALE_XZ * 0.5,
-                        gy * NOISE_SCALE_Y * 0.5,
-                        gz * NOISE_SCALE_XZ * 0.5,
-                        // gx * (NOISE_SCALE_XZ / 80.0_f64),
-                        // gy * (NOISE_SCALE_Y / 160.0_f64),
-                        // gz * (NOISE_SCALE_XZ / 80.0_f64),
-                    ]);
-                    let n_min_limit = noise_min_limit.get([
+                    let n_selector = noise_selector.sample_point_fbm(
+                        gx * (NOISE_SCALE_XZ / 80.0_f64),
+                        gy * (NOISE_SCALE_Y / 160.0_f64),
+                        gz * (NOISE_SCALE_XZ / 80.0_f64),
+                    );
+                    let n_min_limit = noise_min_limit.sample_point_fbm(
                         gx * NOISE_SCALE_XZ,
                         gy * NOISE_SCALE_Y,
                         gz * NOISE_SCALE_XZ,
-                    ]);
-                    let n_max_limit = noise_max_limit.get([
+                    );
+                    let n_max_limit = noise_max_limit.sample_point_fbm(
                         gx * NOISE_SCALE_XZ,
                         gy * NOISE_SCALE_Y,
                         gz * NOISE_SCALE_XZ,
-                    ]);
-
+                    );
 
                     // ---- PER-COLUMN NOISE ----
 
@@ -196,7 +687,7 @@ impl Chunk {
                     horizontal_stretch = horizontal_stretch.min(1.0_f64);
 
                     // elevation/depth
-                    let mut depth = n_depth / 1.0_f64; // 8000.0_f64
+                    let mut depth = n_depth / 8000.0_f64; 
                     if depth < 0.0_f64 { depth = -depth * 0.3_f64 }
                     depth = depth * 3.0_f64 - 2.0_f64;
                     if depth < 0.0_f64 {
@@ -223,8 +714,8 @@ impl Chunk {
                     let mut vertical_falloff = (y as f64 - center_height) * 12.0_f64 / horizontal_stretch;
                     if vertical_falloff < 0.0_f64 { vertical_falloff *= 4.0_f64 }
 
-                    let min_density = n_min_limit / 1.0_f64; // 512.0_f64
-                    let max_density = n_max_limit / 1.0_f64; // 512.0_f64
+                    let min_density = n_min_limit / 512.0_f64;
+                    let max_density = n_max_limit / 512.0_f64;
                     let selector = (n_selector / 10.0_f64 + 1.0_f64) / 2.0_f64;
                     let mut density = lerp(
                         min_density,
@@ -406,9 +897,20 @@ impl App for ExampleScene {
     fn start(&mut self, engine: &mut Engine) {
         let gfx = &engine.gfx;
         let layout = &engine.renderer.texture_bind_group_layout;
+        let mut color_rng = StdRng::seed_from_u64(SEED as u64);
+
+        // tweak to change camera + chunks root position (for precision errors)
+        // make it divisible by CHUNK_SIZE_XZ (16) im pretty sure
+        // also probably keep y=0
+        let offset: [f64; 3] = [12_550_780.0, 0.0, 0.0];
 
         let camera = engine.scene.spawn_camera(
-            [-10.0, 100.0, -10.0],
+            [
+                // (-10.0 + offset[0]) as f32,
+                // (100.0 + offset[1]) as f32,
+                // (-10.0 + offset[2]) as f32,
+                -10.0, 100.0, -10.0
+            ],
             45.0,
             -20.0
         );
@@ -421,7 +923,15 @@ impl App for ExampleScene {
         for x in 0..RENDER_DISTANCE {
             for y in 0..RENDER_HEIGHT {
                 for z in 0..RENDER_DISTANCE {
-                    let mut chunk = Chunk::new([x, y, z]);
+                    // with offset applied
+                    let coords = [
+                        x + (offset[0] as usize / CHUNK_SIZE_XZ),
+                        y + (offset[1] as usize / CHUNK_SIZE_Y),
+                        z + (offset[2] as usize / CHUNK_SIZE_XZ)
+                    ];
+                    let mut chunk = Chunk::new(coords);
+
+                    // skip making model if the chunk is empty (all air)
                     if chunk.is_empty {
                         continue;
                     }
@@ -430,31 +940,20 @@ impl App for ExampleScene {
                     engine.scene.spawn_node(
                         Node3D::new(Some(chunk_model_id)).with_transform(
                             Transform3D::new()
-                                .with_position([(x * CHUNK_SIZE_XZ) as f32, (y * CHUNK_SIZE_Y) as f32, (z * CHUNK_SIZE_XZ) as f32])
+                                .with_position([
+                                    // (coords[0] * CHUNK_SIZE_XZ) as f32,
+                                    // (coords[1] * CHUNK_SIZE_Y) as f32,
+                                    // (coords[2] * CHUNK_SIZE_XZ) as f32
+                                    (x * CHUNK_SIZE_XZ) as f32,
+                                    (y * CHUNK_SIZE_Y) as f32,
+                                    (z * CHUNK_SIZE_XZ) as f32,
+                                    ])
                         )
-                        // .with_color(rand_color())
+                        .with_color(rand_color(&mut color_rng))
                     );
                 }
             }
         }
-
-        // let mut chunk00 = Chunk::new([0, 0, 0]);
-        // let chunk00_model = chunk00.generate_model(gfx, layout);
-        // let chunk00_model_id = engine.scene.load_model(chunk00_model, &engine.gfx);
-        // engine.scene.spawn_node(
-        //     Node3D::new(Some(chunk00_model_id)).with_transform(
-        //         Transform3D::new()
-        //             .with_position([0.0, 0.0, 0.0])
-        //     )
-        // );
-
-        // let mut chunk01 = Chunk::new([0, 0, 1]);
-        // let chunk01_model_id = engine.scene.load_model(chunk01.generate_model(gfx, layout), &engine.gfx);
-        // let mut chunk10 = Chunk::new([1, 0, 0]);
-        // let chunk10_model_id = engine.scene.load_model(chunk10.generate_model(gfx, layout), &engine.gfx);
-        // let mut chunk11 = Chunk::new([1, 0, 1]);
-        // let chunk11_model_id = engine.scene.load_model(chunk11.generate_model(gfx, layout), &engine.gfx);
-
     }
 
     fn update(&mut self, engine: &mut Engine, dt: Duration) {
